@@ -48,7 +48,8 @@ class UdpManager:
         with open(config_path, 'r', encoding='utf-8') as f:
             net = json.load(f)['network']
 
-        self._user_ip = net['user_ip']
+        # UDP 통신 하기 위한 user_ip, host_ip, 포트 번호 (ipconfig.json에서 읽음)
+        self._user_ip = net['user_ip'] # ._ (언더스코어 네이밍): C++ 에서 private과 같은 접근 제어자 키워드 python에는 X, 하지만 관례적으로 _ 붙이면 "이건 내부용이니 외부에서 직접 건드리지 마세요" 라는 의미. 실제로는 외부에서 manager._user_ip 이렇게 접근 가능하지만, 관례적으로는 manager.user_ip 이런 식으로 공개 프로퍼티를 통해 접근하도록 유도. 
         self._host_ip = net['host_ip']
 
         # 수신 포트 (bind — 우리 쪽)
@@ -79,7 +80,7 @@ class UdpManager:
     # 공개 프로퍼티
     # ═══════════════════════════════════════════════════════════════
 
-    @property
+    @property # 읽기 전용 속성: self._ego_state 를 외부에서 수정하지 못하게 막음. 하지만 외부에서는 manager.ego_state 로 쉽게 읽을 수 있음. (상태 변조 막음)
     def ego_state(self) -> EgoState:
         """최신 ego 차량 상태. 아직 수신 전이면 None."""
         return self._ego_state
@@ -92,8 +93,8 @@ class UdpManager:
     @property
     def vehicle_list(self) -> list:
         """object_list 중 차량(obj_type=1)만 필터링."""
-        return [o for o in self._object_list if o.obj_type == OBJ_TYPE_VEHICLE]
-
+        return [o for o in self._object_list if o.obj_type == OBJ_TYPE_VEHICLE] # python의 간결한 반복문: self._object_list를 돌면서 특정 조건(o.obj_type == OBJ_TYPE_VEHICLE)을 만족하는 요소만 골라서 새 리스트로 반환. (OBJ_TYPE_VEHICLE에 대한 정의는 protocol.py 참고)
+        
     @property
     def pedestrian_list(self) -> list:
         """object_list 중 보행자(obj_type=0)만 필터링."""
@@ -115,7 +116,7 @@ class UdpManager:
 
     def start(self):
         """수신기·송신기 소켓을 열고 데몬 스레드를 시작한다."""
-        # ── 수신기 ──
+        # ── Receivers ──
         self._ego_rx = EgoReceiver(
             self._host_ip, self._ego_port, self._on_ego
         )
@@ -126,7 +127,7 @@ class UdpManager:
             self._host_ip, self._tl_port, self._on_traffic_light
         )
 
-        # ── 송신기 ──
+        # ── Senders  ──
         self._ctrl_tx = CtrlCmdSender(
             self._user_ip, self._ctrl_port
         )
