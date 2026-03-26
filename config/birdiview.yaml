@@ -1,0 +1,61 @@
+# ============================================================
+# BEV 관측 설정 — MORAI 환경용
+# ============================================================
+# 원본: carla-roach/config/agent/ppo/obs_configs/birdview.yaml
+# 변경: module 이름을 MORAI 환경에 맞게 수정
+#
+# Ego 차량 위치 근거 (Roach chauffeurnet.py line 230-245):
+#   width=192, pixels_ev_to_bottom=40, pixels_per_meter=5
+#   → ego 차량: 이미지 하단에서 40px 위 (y=152), 좌우 중앙 (x=96)
+#   → 전방 가시거리: (192-40)/5 = 30.4m
+#   → 후방 가시거리: 40/5 = 8.0m
+# ============================================================
+
+birdview:
+  width_in_pixels: 192
+  pixels_ev_to_bottom: 40
+  pixels_per_meter: 5.0
+  history_idx: [-16, -11, -6, -1] # 10Hz 기준: 1.6s, 1.1s, 0.6s, 0.1s 전
+  scale_bbox: false
+  scale_mask_col: 1.1 # 충돌 판정용 bbox 확대 계수
+
+# 채널 밝기값 (Roach 원본과 동일)
+channel_values:
+  lane_solid: 255 # 실선
+  lane_broken: 120 # 점선
+  tl_green: 80 # 80/255 ≈ 0.3137
+  tl_yellow: 170 # 170/255 ≈ 0.6667
+  tl_red: 255 # 255/255 = 1.0
+  stop_sign: 255
+
+# 기본 바운딩 박스 크기 (MORAI에서 크기 미제공 시)
+default_bbox:
+  vehicle_length: 4.5 # 미터
+  vehicle_width: 2.0
+  pedestrian_length: 0.5
+  pedestrian_width: 0.5
+  walker_bbox_scale: 2.0 # Roach 원본: 보행자 bbox 2배 확대
+
+# 감지 범위
+detection:
+  vehicle_distance: 20 # 미터
+  pedestrian_distance: 15
+  vehicle_max_count: 20
+  pedestrian_max_count: 20
+  traffic_light_distance: 18
+  stop_sign_distance: 10
+
+# 경로 설정
+route:
+  max_waypoints: 80 # Roach 원본: route_plan[0:80]
+  line_thickness: 16 # 픽셀 — Roach 원본: thickness=16
+
+# 정적 맵 파일
+static_map:
+  h5_path: "morai_gym/lib/core/birdiview/map/morai_kcity_map.h5"
+
+# 데이터 수집 설정
+collection:
+  output_dir: "./collected_data"
+  max_steps_per_episode: 10000
+  sim_hz: 10 # MORAI 시뮬레이션 주기 (Hz)
