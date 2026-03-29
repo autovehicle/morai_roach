@@ -71,8 +71,10 @@ def main():
             masks = result['masks']         # (12, 192, 192) uint8
 
             # ── 시각화 (확대 표시) ──
-            display_size = 512
+            display_size = 512 
+            
             rendered_bgr = cv.cvtColor(rendered, cv.COLOR_RGB2BGR)
+            cv.imshow('BEV Original (192x192)', rendered_bgr)
             display = cv.resize(rendered_bgr, (display_size, display_size),
                                 interpolation=cv.INTER_NEAREST)
 

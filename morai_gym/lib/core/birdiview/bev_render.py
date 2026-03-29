@@ -242,8 +242,8 @@ class BEVDynamicRenderer:
 
         # Ego의 전방 벡터, 우측 벡터 (세계 좌표)
         forward_vec = np.array([np.cos(yaw), np.sin(yaw)])
-        right_vec = np.array([np.cos(yaw + 0.5 * np.pi),
-                              np.sin(yaw + 0.5 * np.pi)])
+        right_vec = np.array([np.cos(yaw - 0.5 * np.pi),
+                              np.sin(yaw - 0.5 * np.pi)])
 
         mpp = 1.0 / self._ppm  # meters per pixel
         ego_pos = np.array([ego_x, ego_y])
