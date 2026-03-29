@@ -66,9 +66,17 @@ class Config:
  
         # --------- ipconfig.json ----------
         net_path = self.root / 'network' / 'ipconfig.json'
+        if not net_path.exists():
+            net_path = self.root / 'network' / 'UDP' / 'ipconfig.json'
+
+        if not net_path.exists():
+            raise FileNotFoundError(
+                f"ipconfig.json not found in '{self.root / 'network'}' or '{self.root / 'network' / 'UDP'}'"
+            )
+
         with open(net_path, 'r', encoding='utf-8') as f:
             net_cfg = json.load(f)['network']
- 
+
         self.user_ip = net_cfg['user_ip']
         self.host_ip = net_cfg['host_ip']
  
@@ -81,11 +89,45 @@ class Config:
         self.ctrl_tx_port = int(net_cfg['ctrl_cmd_host_port'])        # 9095
  
 
- class MoraiReceiver:
-    def __init__(self):
-        
- 
+class MoraiReceiver:
+    """UdpManager를 감싸는 래퍼. Config 객체로 초기화."""
 
- class BEVRender:
     def __init__(self, config):
-        
+        from network.UDP.udp_manager import UdpManager
+        net_path = str(config.root / 'network' / 'UDP' / 'ipconfig.json')
+        self.manager = UdpManager(config_path=net_path)
+
+    def start(self):
+        self.manager.start()
+
+    def stop(self):
+        self.manager.stop()
+
+    @property
+    def ego_state(self):
+        return self.manager.ego_state
+
+    @property
+    def vehicle_list(self):
+        return self.manager.vehicle_list
+
+    @property
+    def pedestrian_list(self):
+        return self.manager.pedestrian_list
+
+    @property
+    def traffic_light(self):
+        return self.manager.traffic_light
+
+    @property
+    def is_ready(self):
+        return self.manager.is_ready
+
+
+class BEVRender:
+    """BEV 렌더러. 동적 객체 마스킹은 BEVDynamicRenderer에 위임."""
+
+    def __init__(self, config):
+        from morai_gym.lib.core.birdiview.bev_render import BEVDynamicRenderer
+        self.config = config
+        self.dynamic_renderer = BEVDynamicRenderer.from_config(config)
