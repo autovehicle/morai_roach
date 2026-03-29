@@ -10,7 +10,14 @@ Roach 논문 (carla-roach)의 chauffeurnet.py BEV 표현 방식을 그대로 따
   - Ego heading → 이미지 상단 방향
   - 차량: 5각형(pointed front) filled polygon, 히스토리 포함
   - 보행자: 4각형 filled polygon, bbox 2× 스케일, 히스토리 포함
-  - 신호등: 상태별 밝기값 (green=80, yellow=170, red=255), 히스토리 포함
+  - 신호등: stopline을 BEV에 렌더링, 상태별 밝기값 (green=80, yellow=170, red=255)
+
+신호등 stopline 매핑:
+  MORAI는 신호등과 정지선이 1:1 대응되지 않으므로,
+  traffic_light_set.json과 stoplane_marking_set.json을 로드하여
+  각 정지선에서 가장 가까운 신호등을 매핑한다.
+  Roach 원본의 _get_mask_from_stopline_vtx()와 동일하게
+  stopline을 cv.line()으로 BEV에 렌더링한다.
 
 채널 구성 (Roach 원본과 동일):
   masks shape: (3 * len(history_idx), H, W)
@@ -25,14 +32,14 @@ Roach 논문 (carla-roach)의 chauffeurnet.py BEV 표현 방식을 그대로 따
 
 참고:
   - 정적 데이터(도로, 경로, 차선)는 현재 미구현 (시뮬레이션 측 이슈)
-  - 신호등 stopline 위치 정보는 MORAI에서 미제공 → BEV 상단 바(bar)로 표시
 """
 
+import json
 import numpy as np
 import cv2 as cv
 from collections import deque
 from dataclasses import replace
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple
 
 import sys
 from pathlib import Path
@@ -69,6 +76,118 @@ def _tint(color, factor):
     return (r, g, b)
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 신호등 ↔ 정지선 매핑
+# ═══════════════════════════════════════════════════════════════════
+
+class TrafficLightStoplineMapper:
+    """신호등과 정지선의 최근접 매핑을 관리한다.
+
+    MORAI의 traffic_light_set.json과 stoplane_marking_set.json을 로드하여
+    각 정지선에서 가장 가까운 신호등을 찾아 매핑한다.
+
+    매핑 결과:
+      tl_idx → list of stopline_vtx
+      각 stopline_vtx = [(x1, y1), (x2, y2)]  (정지선의 시작점과 끝점)
+
+    Roach 원본에서 TrafficLightHandler.get_stopline_vtx()가 반환하는 것과
+    동일한 형태의 데이터를 제공한다.
+    """
+
+    def __init__(self, tl_json_path: str, stopline_json_path: str,
+                 max_match_distance: float = 30.0):
+        """
+        Args:
+            tl_json_path: traffic_light_set.json 경로.
+            stopline_json_path: stoplane_marking_set.json 경로.
+            max_match_distance: 매칭 최대 거리 (m). 이 거리 초과 시 매핑 안 함.
+        """
+        with open(tl_json_path, 'r', encoding='utf-8') as f:
+            tl_data = json.load(f)
+        with open(stopline_json_path, 'r', encoding='utf-8') as f:
+            stopline_data = json.load(f)
+
+        # 신호등 위치: {idx: (x, y)}
+        tl_positions: Dict[str, Tuple[float, float]] = {}
+        for tl in tl_data:
+            tl_positions[tl['idx']] = (tl['point'][0], tl['point'][1])
+
+        # 정지선 → 시작/끝 꼭짓점 (Roach stopline_vtx 형태)
+        # 각 정지선의 첫 점과 마지막 점을 stopline 양 끝으로 사용
+        stopline_vtx_list: List[Tuple[str, List[Tuple[float, float]]]] = []
+        for sl in stopline_data:
+            pts = sl['points']
+            if len(pts) < 2:
+                continue
+            # 정지선의 시작점과 끝점
+            p_start = (pts[0][0], pts[0][1])
+            p_end = (pts[-1][0], pts[-1][1])
+            # 정지선 중심 (매칭용)
+            cx = sum(p[0] for p in pts) / len(pts)
+            cy = sum(p[1] for p in pts) / len(pts)
+            stopline_vtx_list.append((sl['idx'], cx, cy, [p_start, p_end]))
+
+        # 각 정지선에서 가장 가까운 신호등 찾기 → tl_idx별로 그룹핑
+        # 결과: {tl_idx: [stopline_vtx, ...]}
+        self._tl_to_stoplines: Dict[str, List[List[Tuple[float, float]]]] = {}
+        self._all_tl_positions = tl_positions
+
+        for sl_idx, cx, cy, vtx in stopline_vtx_list:
+            min_dist = float('inf')
+            best_tl_idx = None
+            for tl_idx, (tx, ty) in tl_positions.items():
+                d = np.sqrt((cx - tx) ** 2 + (cy - ty) ** 2)
+                if d < min_dist:
+                    min_dist = d
+                    best_tl_idx = tl_idx
+            if best_tl_idx is not None and min_dist <= max_match_distance:
+                if best_tl_idx not in self._tl_to_stoplines:
+                    self._tl_to_stoplines[best_tl_idx] = []
+                self._tl_to_stoplines[best_tl_idx].append(vtx)
+
+        n_matched = sum(len(v) for v in self._tl_to_stoplines.values())
+        n_tl_matched = len(self._tl_to_stoplines)
+        print(f'[TrafficLightStoplineMapper] '
+              f'{n_tl_matched}/{len(tl_positions)} 신호등에 '
+              f'{n_matched}/{len(stopline_vtx_list)} 정지선 매핑 완료 '
+              f'(max_dist={max_match_distance}m)')
+
+    def get_stopline_vtx(self, tl_idx: str) -> List[List[Tuple[float, float]]]:
+        """신호등 ID에 매핑된 정지선 꼭짓점 리스트를 반환한다.
+
+        Roach 원본의 TrafficLightHandler.get_stopline_vtx()와 동일한 형태.
+
+        Args:
+            tl_idx: 신호등 ID 문자열.
+
+        Returns:
+            list of stopline_vtx.
+            각 stopline_vtx = [(x1, y1), (x2, y2)] — 정지선의 양 끝점.
+            매핑이 없으면 빈 리스트.
+        """
+        return self._tl_to_stoplines.get(tl_idx, [])
+
+    def get_nearby_stoplines(self, ego_x: float, ego_y: float,
+                             max_dist: float = 50.0
+                             ) -> Dict[str, List[List[Tuple[float, float]]]]:
+        """Ego 주변의 신호등 → 정지선 매핑을 반환한다.
+
+        Args:
+            ego_x, ego_y: Ego 차량 세계 좌표 (m).
+            max_dist: 검색 반경 (m).
+
+        Returns:
+            {tl_idx: [stopline_vtx, ...]} — ego 주변 신호등만 포함.
+        """
+        nearby = {}
+        for tl_idx, (tx, ty) in self._all_tl_positions.items():
+            if abs(tx - ego_x) < max_dist and abs(ty - ego_y) < max_dist:
+                vtx_list = self._tl_to_stoplines.get(tl_idx)
+                if vtx_list:
+                    nearby[tl_idx] = vtx_list
+        return nearby
+
+
 class BEVDynamicRenderer:
     """동적 객체(차량, 보행자, 신호등)를 BEV 이미지에 마스킹하는 렌더러.
 
@@ -95,11 +214,13 @@ class BEVDynamicRenderer:
         walker_bbox_scale: float = 2.0,
         vehicle_distance: float = 20.0,
         pedestrian_distance: float = 15.0,
+        tl_distance: float = 18.0,
         tl_green_val: int = 80,
         tl_yellow_val: int = 170,
         tl_red_val: int = 255,
         default_veh_size: tuple = (4.5, 2.0),
         default_ped_size: tuple = (0.5, 0.5),
+        tl_mapper: Optional['TrafficLightStoplineMapper'] = None,
     ):
         """
         Args:
@@ -112,11 +233,13 @@ class BEVDynamicRenderer:
             walker_bbox_scale: 보행자 bbox 확대 계수 (Roach 기본값: 2.0).
             vehicle_distance: 차량 감지 범위 (meters).
             pedestrian_distance: 보행자 감지 범위 (meters).
+            tl_distance: 신호등 감지 범위 (meters).
             tl_green_val: 녹색 신호등 채널 밝기값 (Roach: 80 ≈ 0.3137).
             tl_yellow_val: 황색 신호등 채널 밝기값 (Roach: 170 ≈ 0.6667).
             tl_red_val: 적색 신호등 채널 밝기값 (Roach: 255 = 1.0).
             default_veh_size: MORAI에서 크기 미제공 시 기본 차량 크기 (length, width) meters.
             default_ped_size: MORAI에서 크기 미제공 시 기본 보행자 크기 (length, width) meters.
+            tl_mapper: 신호등 ↔ 정지선 매퍼. None이면 stopline 렌더링 비활성화.
         """
         self._width = width
         self._ev_to_bottom = pixels_ev_to_bottom
@@ -126,6 +249,7 @@ class BEVDynamicRenderer:
         self._walker_scale = walker_bbox_scale
         self._veh_dist = vehicle_distance
         self._ped_dist = pedestrian_distance
+        self._tl_dist = tl_distance
 
         self._tl_green_val = tl_green_val
         self._tl_yellow_val = tl_yellow_val
@@ -133,6 +257,14 @@ class BEVDynamicRenderer:
 
         self._default_veh_size = default_veh_size   # (length, width) m
         self._default_ped_size = default_ped_size
+
+        # 신호등 ↔ 정지선 매퍼
+        self._tl_mapper = tl_mapper
+
+        # 신호등 상태 캐시: {tl_idx: 'green'|'yellow'|'red'}
+        # MORAI UDP는 한 번에 하나의 신호등 상태만 전송하므로
+        # 수신된 상태를 캐시하여 여러 신호등의 상태를 유지한다.
+        self._tl_state_cache: Dict[str, str] = {}
 
         # 히스토리 큐 — 최대 20프레임 보관 (10Hz × 2초)
         self._history_queue: deque = deque(maxlen=20)
@@ -144,6 +276,19 @@ class BEVDynamicRenderer:
     @classmethod
     def from_config(cls, config):
         """map_to_h5.py의 Config 객체로부터 렌더러를 생성한다."""
+        # 신호등 ↔ 정지선 매퍼 생성 (JSON 파일이 존재할 때만)
+        map_dir = Path(config.root) / 'morai_gym' / 'lib' / 'core' / 'birdiview' / 'map'
+        tl_json = map_dir / 'traffic_light_set.json'
+        sl_json = map_dir / 'stoplane_marking_set.json'
+
+        tl_mapper = None
+        if tl_json.exists() and sl_json.exists():
+            tl_mapper = TrafficLightStoplineMapper(str(tl_json), str(sl_json))
+            print(f'[BEVDynamicRenderer] Stopline mapper loaded.')
+        else:
+            print(f'[BEVDynamicRenderer] WARNING: JSON files not found, '
+                  f'stopline rendering disabled.')
+
         return cls(
             width=config.width,
             pixels_ev_to_bottom=config.ev_to_bottom,
@@ -153,11 +298,13 @@ class BEVDynamicRenderer:
             walker_bbox_scale=config.walker_scale,
             vehicle_distance=config.veh_dist,
             pedestrian_distance=config.ped_dist,
+            tl_distance=config.tl_dist,
             tl_green_val=config.tl_green,
             tl_yellow_val=config.tl_yellow,
             tl_red_val=config.tl_red,
             default_veh_size=config.veh_size,
             default_ped_size=config.ped_size,
+            tl_mapper=tl_mapper,
         )
 
     # ═══════════════════════════════════════════════════════════════
@@ -198,21 +345,32 @@ class BEVDynamicRenderer:
         if self._walker_scale != 1.0:
             pedestrians = self._scale_objects(pedestrians, self._walker_scale)
 
-        # ── 3) 히스토리 큐에 저장 ──
-        self._history_queue.append((vehicles, pedestrians, traffic_light))
+        # ── 3) 신호등 상태 캐시 업데이트 ──
+        #   MORAI UDP는 한 번에 하나의 신호등만 전송하므로
+        #   수신할 때마다 해당 신호등의 상태를 캐시에 저장한다.
+        if traffic_light is not None:
+            state = self._classify_traffic_light(traffic_light)
+            if state is not None:
+                self._tl_state_cache[str(traffic_light.index)] = state
 
-        # ── 4) Affine 변환 행렬 생성 (세계 좌표 → BEV 픽셀) ──
+        # ── 4) 히스토리 큐에 저장 (신호등은 현재 캐시 스냅샷) ──
+        tl_cache_snapshot = dict(self._tl_state_cache)
+        self._history_queue.append(
+            (vehicles, pedestrians, tl_cache_snapshot, ego_state))
+
+        # ── 5) Affine 변환 행렬 생성 (세계 좌표 → BEV 픽셀) ──
         M_warp = self._get_warp_transform(
             ego_state.pos_x, ego_state.pos_y, ego_state.yaw)
 
-        # ── 5) 히스토리별 마스크 렌더링 ──
-        vehicle_masks, walker_masks, tl_masks = self._get_history_masks(M_warp)
+        # ── 6) 히스토리별 마스크 렌더링 ──
+        vehicle_masks, walker_masks, tl_masks = self._get_history_masks(
+            M_warp, ego_state)
 
-        # ── 6) RGB 시각화 이미지 ──
+        # ── 7) RGB 시각화 이미지 ──
         rendered = self._render_rgb(
             vehicle_masks, walker_masks, tl_masks, ego_state, M_warp)
 
-        # ── 7) 출력 마스크 채널 조합 ──
+        # ── 8) 출력 마스크 채널 조합 ──
         c_vehicle = [m.astype(np.uint8) * 255 for m in vehicle_masks]
         c_walker = [m.astype(np.uint8) * 255 for m in walker_masks]
         c_tl = tl_masks  # 이미 uint8 밝기값
@@ -222,8 +380,9 @@ class BEVDynamicRenderer:
         return {'rendered': rendered, 'masks': masks}
 
     def reset(self):
-        """히스토리 큐를 초기화한다. 에피소드 시작 시 호출."""
+        """히스토리 큐와 신호등 캐시를 초기화한다. 에피소드 시작 시 호출."""
         self._history_queue.clear()
+        self._tl_state_cache.clear()
 
     # ═══════════════════════════════════════════════════════════════
     # 좌표 변환
@@ -386,42 +545,83 @@ class BEVDynamicRenderer:
             return 'red'
         return None
 
-    def _render_traffic_light_mask(self, tl_data: Optional[TrafficLightData]):
-        """신호등 상태를 BEV 마스크로 렌더링한다.
+    def _get_mask_from_stopline_vtx(self, stopline_vtx: list, M_warp):
+        """정지선 꼭짓점을 BEV 마스크에 렌더링한다.
 
-        MORAI는 신호등의 stopline 위치 정보를 제공하지 않으므로,
-        Roach 원본의 stopline 렌더링 대신 BEV 이미지 상단에
-        가로 바(bar)로 신호등 상태를 표시한다.
+        Roach chauffeurnet.py의 _get_mask_from_stopline_vtx()와 동일.
+        각 정지선의 양 끝점을 세계 좌표에서 BEV 픽셀로 변환 후
+        cv.line()으로 그린다.
 
-        바(bar) 위치: BEV 이미지 상단 10~16px 영역
-        → Ego 전방 약 (192-40-10)/5 ≈ 28.4m ~ (192-40-16)/5 ≈ 27.2m 지점
-
-        채널 밝기값 (Roach 원본과 동일):
-          Green:  80  (80/255 ≈ 0.3137)
-          Yellow: 170 (170/255 ≈ 0.6667)
-          Red:    255 (255/255 = 1.0)
+        Args:
+            stopline_vtx: [[(x1,y1), (x2,y2)], ...] — 정지선 양 끝점 리스트.
+            M_warp: 세계 좌표 → BEV 픽셀 아핀 변환 행렬 (2×3).
 
         Returns:
-            (H, W) uint8 마스크. 해당 상태의 밝기값 또는 0.
+            (H, W) bool 마스크.
+        """
+        mask = np.zeros([self._width, self._width], dtype=np.uint8)
+        for sp_locs in stopline_vtx:
+            # sp_locs = [(x1, y1), (x2, y2)]
+            stopline_in_pixel = np.array(
+                [[list(x)] for x in sp_locs], dtype=np.float32)
+            stopline_warped = cv.transform(stopline_in_pixel, M_warp)
+            cv.line(mask,
+                    tuple(np.round(stopline_warped[0, 0]).astype(int)),
+                    tuple(np.round(stopline_warped[1, 0]).astype(int)),
+                    color=1, thickness=6)
+        return mask.astype(bool)
+
+    def _render_tl_stopline_mask(self, tl_state_cache: dict,
+                                 ego_state: EgoState, M_warp):
+        """Roach 원본 방식: 신호등 상태별 stopline을 BEV에 렌더링한다.
+
+        Roach chauffeurnet.py의 _get_history_masks() 내부 신호등 처리와 동일:
+          1. Ego 주변 신호등 → 매핑된 정지선 찾기
+          2. 신호등 상태별로 stopline을 분류
+          3. 각 상태의 stopline을 _get_mask_from_stopline_vtx()로 렌더링
+          4. 마스크에 해당 상태의 밝기값 적용
+
+        채널 밝기값:
+          Green:  80, Yellow: 170, Red: 255
+
+        Args:
+            tl_state_cache: {tl_idx: 'green'|'yellow'|'red'} — 신호등 상태 캐시.
+            ego_state: Ego 차량 상태.
+            M_warp: 세계 좌표 → BEV 아핀 변환 행렬.
+
+        Returns:
+            (H, W) uint8 마스크 (밝기값으로 상태 구분).
         """
         mask = np.zeros([self._width, self._width], dtype=np.uint8)
 
-        state = self._classify_traffic_light(tl_data)
-        if state is None:
+        if self._tl_mapper is None:
             return mask
+
+        # Ego 주변 신호등의 매핑된 정지선 가져오기
+        nearby = self._tl_mapper.get_nearby_stoplines(
+            ego_state.pos_x, ego_state.pos_y, self._tl_dist)
 
         val_map = {
             'green':  self._tl_green_val,    # 80
             'yellow': self._tl_yellow_val,   # 170
             'red':    self._tl_red_val,       # 255
         }
-        val = val_map[state]
 
-        # Roach 원본의 stopline 두께: thickness=6
-        # 여기서도 6px 높이의 바(bar)로 표시
-        bar_y_start = 10
-        bar_y_end = 16
-        mask[bar_y_start:bar_y_end, :] = val
+        # 상태별 stopline 분류
+        stoplines_by_state: Dict[str, list] = {
+            'green': [], 'yellow': [], 'red': []
+        }
+        for tl_idx, vtx_list in nearby.items():
+            state = tl_state_cache.get(tl_idx)
+            if state is not None and state in stoplines_by_state:
+                stoplines_by_state[state].extend(vtx_list)
+
+        # 각 상태별로 stopline 렌더링
+        for state, vtx_list in stoplines_by_state.items():
+            if not vtx_list:
+                continue
+            state_mask = self._get_mask_from_stopline_vtx(vtx_list, M_warp)
+            mask[state_mask] = val_map[state]
 
         return mask
 
@@ -429,11 +629,15 @@ class BEVDynamicRenderer:
     # 히스토리 처리
     # ═══════════════════════════════════════════════════════════════
 
-    def _get_history_masks(self, M_warp):
+    def _get_history_masks(self, M_warp, ego_state: EgoState):
         """히스토리 인덱스에 따라 과거 프레임들의 마스크를 생성한다.
 
         Roach chauffeurnet.py의 _get_history_masks()와 동일한 로직.
         history_idx = [-16, -11, -6, -1] 이면 4개의 시점에 대해 마스크 생성.
+
+        신호등은 Roach 원본 방식으로 stopline을 렌더링한다:
+          각 시점의 tl_state_cache를 사용하여 해당 시점의 신호등 상태에
+          맞는 stopline을 BEV에 그린다.
 
         Returns:
             vehicle_masks: list[bool mask], len = len(history_idx)
@@ -448,14 +652,15 @@ class BEVDynamicRenderer:
         for idx in self._history_idx:
             # 큐 크기보다 과거를 요청하면 가장 오래된 프레임 사용
             actual_idx = max(idx, -qsize)
-            vehicles, pedestrians, tl = self._history_queue[actual_idx]
+            vehicles, pedestrians, tl_cache, _ = \
+                self._history_queue[actual_idx]
 
             vehicle_masks.append(
                 self._get_mask_from_objects(vehicles, M_warp, is_vehicle=True))
             walker_masks.append(
                 self._get_mask_from_objects(pedestrians, M_warp, is_vehicle=False))
             tl_masks.append(
-                self._render_traffic_light_mask(tl))
+                self._render_tl_stopline_mask(tl_cache, ego_state, M_warp))
 
         return vehicle_masks, walker_masks, tl_masks
 
