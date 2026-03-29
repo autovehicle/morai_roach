@@ -1,3 +1,15 @@
+"""
+MORAI SIM → UDP 패킷 → receiver.py 파싱 → protocol.py 데이터 객체 → udp_manager.py 저장
+↓
+BEV 렌더러가 여기서 가져감
+manager.vehicle_list
+manager.pedestrian_list
+manager.traffic_light
+"""
+"""
+BEV renderer/RL agent → 제어 명령 → udp_manager.send_ctrl() → sender.py 패킹 → UDP 패킷 → MORAI SIM
+"""
+
 # protocl.py
 
 해당 파일은 실제 통신하는 코드가 아님. MORAI에서 주고받는 MSG의 형태만 정의한 것.
