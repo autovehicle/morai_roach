@@ -65,7 +65,9 @@ COLOR_CYAN = (0, 255, 255)      # 보행자
 COLOR_GREEN = (0, 255, 0)       # 신호등 - 녹색
 COLOR_YELLOW = (255, 255, 0)    # 신호등 - 황색
 COLOR_RED = (255, 0, 0)         # 신호등 - 적색
-COLOR_WHITE = (255, 255, 255)   # Ego 차량
+COLOR_WHITE = (255, 255, 255)   # 실선(Solid)
+COLOR_GRAY = (120, 120, 120)    # 점선(Broken/Dashed)
+COLOR_EGO = (200, 255, 200)     # Ego 차량 (연한 초록색, 실선과 구분)
 
 
 def _tint(color, factor):
@@ -221,6 +223,11 @@ class BEVDynamicRenderer:
         default_veh_size: tuple = (4.5, 2.0),
         default_ped_size: tuple = (0.5, 0.5),
         tl_mapper: Optional['TrafficLightStoplineMapper'] = None,
+        lane_markings: Optional[List[Dict]] = None,
+        lane_max_range: float = 50.0,
+        lane_thickness: int = 2,
+        lane_solid_value: int = 255,
+        lane_broken_value: int = 120,
     ):
         """
         Args:
@@ -269,6 +276,13 @@ class BEVDynamicRenderer:
         # 히스토리 큐 — 최대 20프레임 보관 (10Hz × 2초)
         self._history_queue: deque = deque(maxlen=20)
 
+        # 차선 마스크
+        self._lane_markings = lane_markings if lane_markings is not None else []
+        self._lane_max_range = lane_max_range
+        self._lane_thickness = lane_thickness
+        self._lane_solid_value = lane_solid_value
+        self._lane_broken_value = lane_broken_value
+
     # ───────────────────────────────────────────────────────────────
     # 팩토리 메서드
     # ───────────────────────────────────────────────────────────────
@@ -289,6 +303,14 @@ class BEVDynamicRenderer:
             print(f'[BEVDynamicRenderer] WARNING: JSON files not found, '
                   f'stopline rendering disabled.')
 
+        lane_json = map_dir / 'lane_marking_set.json'
+        lane_markings = []
+        if lane_json.exists():
+            lane_markings = cls._load_lane_markings(str(lane_json))
+            print(f'[BEVDynamicRenderer] Lane markings loaded: {len(lane_markings)} elements')
+        else:
+            print(f'[BEVDynamicRenderer] WARNING: lane_marking_set.json not found, lane rendering disabled.')
+
         return cls(
             width=config.width,
             pixels_ev_to_bottom=config.ev_to_bottom,
@@ -305,6 +327,11 @@ class BEVDynamicRenderer:
             default_veh_size=config.veh_size,
             default_ped_size=config.ped_size,
             tl_mapper=tl_mapper,
+            lane_markings=lane_markings,
+            lane_max_range=50.0,
+            lane_thickness=int(getattr(config, 'route_thick', 2)),
+            lane_solid_value=config.lane_solid,
+            lane_broken_value=config.lane_broken,
         )
 
     # ═══════════════════════════════════════════════════════════════
@@ -366,16 +393,19 @@ class BEVDynamicRenderer:
         vehicle_masks, walker_masks, tl_masks = self._get_history_masks(
             M_warp, ego_state)
 
-        # ── 7) RGB 시각화 이미지 ──
+        # ── 7) 차선 마스크 생성 및 RGB에 오버레이 ──
+        lane_mask = self._get_lane_mask(ego_state)
+
         rendered = self._render_rgb(
-            vehicle_masks, walker_masks, tl_masks, ego_state, M_warp)
+            vehicle_masks, walker_masks, tl_masks, lane_mask, ego_state, M_warp)
 
         # ── 8) 출력 마스크 채널 조합 ──
         c_vehicle = [m.astype(np.uint8) * 255 for m in vehicle_masks]
         c_walker = [m.astype(np.uint8) * 255 for m in walker_masks]
         c_tl = tl_masks  # 이미 uint8 밝기값
+        c_lane = lane_mask.astype(np.uint8)
 
-        masks = np.stack((*c_vehicle, *c_walker, *c_tl), axis=0)
+        masks = np.stack((*c_vehicle, *c_walker, *c_tl, c_lane), axis=0)
 
         return {'rendered': rendered, 'masks': masks}
 
@@ -383,6 +413,90 @@ class BEVDynamicRenderer:
         """히스토리 큐와 신호등 캐시를 초기화한다. 에피소드 시작 시 호출."""
         self._history_queue.clear()
         self._tl_state_cache.clear()
+
+    @staticmethod
+    def _load_lane_markings(lane_json_path: str):
+        if lane_json_path is None:
+            return []
+        path = Path(lane_json_path)
+        if not path.exists():
+            print(f"[BEVDynamicRenderer] WARNING: lane json not found: {lane_json_path}")
+            return []
+
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            print(f"[BEVDynamicRenderer] WARNING: lane json load fail: {e}")
+            return []
+
+        lanes = []
+        for item in data:
+            pts = np.asarray(item.get('points', []), dtype=np.float32)
+            lane_type = item.get('lane_type', -1)
+            if lane_type == 530:
+                continue
+            if pts.ndim == 2 and pts.shape[1] >= 2 and pts.shape[0] >= 2:
+                # lane_shape: ['Solid'], ['Broken'] 등
+                lane_shape = item.get('lane_shape', [])
+                shape_str = lane_shape[0].lower() if lane_shape else 'solid'
+                lanes.append({
+                    'idx': item.get('idx', ''),
+                    'points': pts,
+                    'lane_type': lane_type,
+                    'lane_color': item.get('lane_color', ''),
+                    'lane_shape': shape_str,  # 'solid', 'broken' 등
+                    'line_width': item.get('line_width', 0.15),  # 기본값 0.15m
+                })
+        return lanes
+
+    def _get_lane_mask(self, ego_state: EgoState):
+        """Ego 주변의 차선을 BEV 마스크에 렌더링한다.
+        
+        마스크 값:
+          - 255 (흰색): 실선(Solid)
+          - 120 (회색): 점선(Broken/Dashed)
+        """
+        mask = np.zeros([self._width, self._width], dtype=np.uint8)
+        if not self._lane_markings or ego_state is None:
+            return mask.astype(bool)
+
+        M_warp = self._get_warp_transform(
+            ego_state.pos_x, ego_state.pos_y, ego_state.yaw)
+
+        for lane in self._lane_markings:
+            pts = lane['points']
+            dist = np.sqrt((pts[:, 0] - ego_state.pos_x) ** 2 +
+                           (pts[:, 1] - ego_state.pos_y) ** 2)
+            pts_in_range = pts[dist <= self._lane_max_range]
+            if pts_in_range.shape[0] < 2:
+                continue
+
+            pts_xy = pts_in_range[:, :2].reshape(-1, 1, 2).astype(np.float32)
+            pts_bev = cv.transform(pts_xy, M_warp)
+            pts_bev = np.ascontiguousarray(np.round(pts_bev).astype(np.int32))
+
+            # lane_shape: 'solid', 'broken', 'dashed' 등
+            lane_shape = str(lane.get('lane_shape', 'solid')).lower()
+            if lane_shape in ('broken', 'dashed', 'dash'):
+                val = self._lane_broken_value  # 120 (회색)
+            else:
+                val = self._lane_solid_value   # 255 (흰색)
+
+            # 동적 두께 계산: line_width (m) * pixels_per_meter
+            line_width = lane.get('line_width', 0.15)
+            thickness = max(1, int(line_width * self._ppm))
+
+            # 차선을 마스크에 그리기
+            cv.polylines(
+                mask,
+                [pts_bev],
+                isClosed=False,
+                color=int(val),
+                thickness=thickness,
+            )
+
+        return mask
 
     # ═══════════════════════════════════════════════════════════════
     # 좌표 변환
@@ -738,7 +852,7 @@ class BEVDynamicRenderer:
         return mask.astype(bool)
 
     def _render_rgb(self, vehicle_masks, walker_masks, tl_masks,
-                    ego_state, M_warp):
+                    lane_mask, ego_state, M_warp):
         """디버깅/시각화용 RGB 이미지를 렌더링한다.
 
         Roach chauffeurnet.py의 렌더링 순서와 색상을 그대로 따름:
@@ -774,8 +888,16 @@ class BEVDynamicRenderer:
             if np.any(mask):
                 image[mask] = _tint(COLOR_CYAN, (h_len - i) * 0.2)
 
-        # Ego 차량 (흰색)
+        # 차선 (CARLA Roach 명세: 실선=흰색, 점선=회색)
+        if lane_mask is not None and np.any(lane_mask):
+            solid_mask = (lane_mask == self._lane_solid_value)
+            broken_mask = (lane_mask == self._lane_broken_value)
+            image[solid_mask] = COLOR_WHITE       # Solid: 255, 255, 255
+            image[broken_mask] = COLOR_GRAY       # Broken: 120, 120, 120
+
+        # Ego 차량 (연한 초록색) - 최상단
+        # 실선(흰색)과 구분하기 위해 다른 색 사용
         ego_mask = self._render_ego_mask(ego_state, M_warp)
-        image[ego_mask] = COLOR_WHITE
+        image[ego_mask] = COLOR_EGO
 
         return image

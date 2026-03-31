@@ -30,6 +30,41 @@ from morai_gym.lib.core.birdiview.map_to_h5 import Config
 from morai_gym.lib.core.birdiview.bev_render import BEVDynamicRenderer
 
 
+def test_lane_rendering():
+    """MORAI 없이 차선 렌더링만 테스트."""
+    
+    # 더미 ego_state (원점 근처)
+    class DummyEgo:
+        def __init__(self):
+            self.pos_x = 0.0
+            self.pos_y = 0.0
+            self.yaw = 0.0
+    
+    ego = DummyEgo()
+    
+    # Config 로드
+    config = Config(project_root)
+    
+    # BEV renderer 생성 (lane markings 포함)
+    renderer = BEVDynamicRenderer.from_config(config)
+    
+    # 차선 마스크 생성 (renderer의 lane markings 사용)
+    lane_mask = renderer._get_lane_mask(ego)
+    
+    print(f'Lane mask shape: {lane_mask.shape}, dtype: {lane_mask.dtype}')
+    print(f'Lane pixels: {np.sum(lane_mask > 0)}')
+    print(f'Sample line_width: {renderer._lane_markings[0]["line_width"] if renderer._lane_markings else "none"}')
+    
+    # 시각화
+    display_size = 512
+    lane_bgr = cv.cvtColor(lane_mask, cv.COLOR_GRAY2BGR)
+    display = cv.resize(lane_bgr, (display_size, display_size), interpolation=cv.INTER_NEAREST)
+    
+    cv.imshow('Lane Mask Test', display)
+    cv.waitKey(1000)  # 1초 대기 후 자동 종료
+    cv.destroyAllWindows()
+
+
 def main():
     # ── config 경로 로드 (birdview.yaml) ──
     config = Config(project_root)
@@ -98,20 +133,23 @@ def main():
             # ── 개별 채널 시각화 (선택적) ──
             n_hist = len(renderer._history_idx)
 
-            # 최신 프레임의 차량/보행자/신호등 마스크
+            # 최신 프레임의 차량/보행자/신호등/차선 마스크
             veh_mask = masks[n_hist - 1]        # 가장 최근 차량
             ped_mask = masks[2 * n_hist - 1]    # 가장 최근 보행자
             tl_mask = masks[3 * n_hist - 1]     # 가장 최근 신호등
+            lane_mask = masks[3 * n_hist] if masks.shape[0] > 3 * n_hist else np.zeros_like(veh_mask)
 
-            channel_display = np.hstack([veh_mask, ped_mask, tl_mask])
+            channel_display = np.hstack([veh_mask, ped_mask, tl_mask, lane_mask])
             channel_display = cv.resize(
-                channel_display, (display_size * 3, display_size),
+                channel_display, (display_size * 4, display_size),
                 interpolation=cv.INTER_NEAREST)
             cv.putText(channel_display, 'Vehicle', (10, 20),
                        cv.FONT_HERSHEY_SIMPLEX, 0.5, (255,), 1)
             cv.putText(channel_display, 'Pedestrian', (display_size + 10, 20),
                        cv.FONT_HERSHEY_SIMPLEX, 0.5, (255,), 1)
             cv.putText(channel_display, 'Traffic Light', (display_size * 2 + 10, 20),
+                       cv.FONT_HERSHEY_SIMPLEX, 0.5, (255,), 1)
+            cv.putText(channel_display, 'Lane', (display_size * 3 + 10, 20),
                        cv.FONT_HERSHEY_SIMPLEX, 0.5, (255,), 1)
             cv.imshow('BEV Channels (latest)', channel_display)
 
@@ -137,4 +175,7 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == '--test-lane':
+        test_lane_rendering()
+    else:
+        main()
