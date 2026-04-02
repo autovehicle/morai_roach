@@ -228,6 +228,9 @@ class BEVDynamicRenderer:
         lane_thickness: int = 2,
         lane_solid_value: int = 255,
         lane_broken_value: int = 120,
+        link_data: Optional[List[Dict]] = None,
+        link_max_range: float = 50.0,
+        link_thickness: int = 1,
     ):
         """
         Args:
@@ -283,6 +286,11 @@ class BEVDynamicRenderer:
         self._lane_solid_value = lane_solid_value
         self._lane_broken_value = lane_broken_value
 
+        # 도로 링크 (link_set.json)
+        self._link_data = link_data if link_data is not None else []
+        self._link_max_range = link_max_range
+        self._link_thickness = link_thickness
+
     # ───────────────────────────────────────────────────────────────
     # 팩토리 메서드
     # ───────────────────────────────────────────────────────────────
@@ -311,6 +319,16 @@ class BEVDynamicRenderer:
         else:
             print(f'[BEVDynamicRenderer] WARNING: lane_marking_set.json not found, lane rendering disabled.')
 
+            # ── link_set.json 로드 추가 ──
+        link_json = map_dir / 'link_set.json'
+        link_data = []
+        if link_json.exists():
+            link_data = cls._load_link_set(str(link_json))
+            print(f'[BEVDynamicRenderer] Link set loaded: {len(link_data)} links')
+        else:
+            print(f'[BEVDynamicRenderer] WARNING: link_set.json not found, link rendering disabled.')
+
+
         return cls(
             width=config.width,
             pixels_ev_to_bottom=config.ev_to_bottom,
@@ -332,6 +350,9 @@ class BEVDynamicRenderer:
             lane_thickness=int(getattr(config, 'route_thick', 2)),
             lane_solid_value=config.lane_solid,
             lane_broken_value=config.lane_broken,
+            link_data=link_data,
+            link_max_range=50.0,
+            link_thickness=1,
         )
 
     # ═══════════════════════════════════════════════════════════════
@@ -396,16 +417,21 @@ class BEVDynamicRenderer:
         # ── 7) 차선 마스크 생성 및 RGB에 오버레이 ──
         lane_mask = self._get_lane_mask(ego_state)
 
+        # ── 7-1) 도로 링크 마스크 생성 ── 
+        link_mask = self._get_link_mask(ego_state)  
+
         rendered = self._render_rgb(
-            vehicle_masks, walker_masks, tl_masks, lane_mask, ego_state, M_warp)
+            vehicle_masks, walker_masks, tl_masks, lane_mask, link_mask, ego_state, M_warp)
 
         # ── 8) 출력 마스크 채널 조합 ──
         c_vehicle = [m.astype(np.uint8) * 255 for m in vehicle_masks]
         c_walker = [m.astype(np.uint8) * 255 for m in walker_masks]
         c_tl = tl_masks  # 이미 uint8 밝기값
         c_lane = lane_mask.astype(np.uint8)
+        c_link = link_mask.astype(np.uint8)  
 
-        masks = np.stack((*c_vehicle, *c_walker, *c_tl, c_lane), axis=0)
+
+        masks = np.stack((*c_vehicle, *c_walker, *c_tl, c_lane, c_link), axis=0)
 
         return {'rendered': rendered, 'masks': masks}
 
@@ -449,6 +475,36 @@ class BEVDynamicRenderer:
                     'line_width': item.get('line_width', 0.15),  # 기본값 0.15m
                 })
         return lanes
+    
+    @staticmethod
+    def _load_link_set(link_json_path: str):
+        """link_set.json을 로드하여 BEV 렌더링용 데이터로 변환한다."""
+        if link_json_path is None:
+            return []
+        path = Path(link_json_path)
+        if not path.exists():
+            print(f"[BEVDynamicRenderer] WARNING: link json not found: {link_json_path}")
+            return []
+
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            print(f"[BEVDynamicRenderer] WARNING: link json load fail: {e}")
+            return []
+
+        links = []
+        for item in data:
+            pts = np.asarray(item.get('points', []), dtype=np.float32)
+            if pts.ndim == 2 and pts.shape[1] >= 2 and pts.shape[0] >= 2:
+                links.append({
+                    'idx': item.get('idx', ''),
+                    'points': pts,
+                    'link_type': item.get('link_type'),       # '1', '6', None
+                    'road_type': item.get('road_type'),
+                    'width_start': item.get('width_start', 3.5),
+                })
+        return links
 
     def _get_lane_mask(self, ego_state: EgoState):
         """Ego 주변의 차선을 BEV 마스크에 렌더링한다.
@@ -494,6 +550,46 @@ class BEVDynamicRenderer:
                 isClosed=False,
                 color=int(val),
                 thickness=thickness,
+            )
+
+        return mask
+    
+    def _get_link_mask(self, ego_state: EgoState):
+
+        mask = np.zeros([self._width, self._width], dtype=np.uint8)
+        if not self._link_data or ego_state is None:
+            return mask
+
+        M_warp = self._get_warp_transform(
+            ego_state.pos_x, ego_state.pos_y, ego_state.yaw)
+
+        for link in self._link_data:
+            pts = link['points']
+            dist = np.sqrt((pts[:, 0] - ego_state.pos_x) ** 2 +
+                        (pts[:, 1] - ego_state.pos_y) ** 2)
+            pts_in_range = pts[dist <= self._link_max_range]
+            if pts_in_range.shape[0] < 2:
+                continue
+
+            pts_xy = pts_in_range[:, :2].reshape(-1, 1, 2).astype(np.float32)
+            pts_bev = cv.transform(pts_xy, M_warp)
+            pts_bev = np.ascontiguousarray(np.round(pts_bev).astype(np.int32))
+
+            # link_type별 밝기값 구분
+            lt = link.get('link_type')
+            if lt == '1':
+                val = 200
+            elif lt == '6':
+                val = 140
+            else:
+                val = 100
+
+            cv.polylines(
+                mask,
+                [pts_bev],
+                isClosed=False,
+                color=int(val),
+                thickness=self._link_thickness,
             )
 
         return mask
@@ -852,7 +948,7 @@ class BEVDynamicRenderer:
         return mask.astype(bool)
 
     def _render_rgb(self, vehicle_masks, walker_masks, tl_masks,
-                    lane_mask, ego_state, M_warp):
+                    lane_mask, link_mask, ego_state, M_warp):
         """디버깅/시각화용 RGB 이미지를 렌더링한다.
 
         Roach chauffeurnet.py의 렌더링 순서와 색상을 그대로 따름:
@@ -864,6 +960,16 @@ class BEVDynamicRenderer:
         image = np.zeros([self._width, self._width, 3], dtype=np.uint8)
 
         h_len = len(self._history_idx) - 1
+
+            # ── 도로 링크 (가장 먼저 = 배경) ──  ← 추가
+        if link_mask is not None and np.any(link_mask):
+            # link_type별 색상 구분
+            type1_mask = (link_mask == 200)
+            type6_mask = (link_mask == 140)
+            other_mask = (link_mask == 100)
+            image[type1_mask] = (255, 105, 180)   # 일반 도로: 핫핑크
+            image[type6_mask] = (255, 182, 193)   # 교차로: 라이트핑크
+            image[other_mask] = (219, 112, 147)   # 미분류: 팔레 바이올렛 레드
 
         # 신호등 (밝기값으로 상태 구분)
         for i, tl_mask in enumerate(tl_masks):
