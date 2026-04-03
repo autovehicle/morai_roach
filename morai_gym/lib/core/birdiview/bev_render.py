@@ -97,7 +97,7 @@ class TrafficLightStoplineMapper:
     """
 
     def __init__(self, tl_json_path: str, stopline_json_path: str,
-                 max_match_distance: float = 30.0):
+                 max_match_distance: float = 100.0):
         """
         Args:
             tl_json_path: traffic_light_set.json 경로.
@@ -216,7 +216,7 @@ class BEVDynamicRenderer:
         walker_bbox_scale: float = 2.0,
         vehicle_distance: float = 20.0,
         pedestrian_distance: float = 15.0,
-        tl_distance: float = 18.0,
+        tl_distance: float = 100.0,
         tl_green_val: int = 80,
         tl_yellow_val: int = 170,
         tl_red_val: int = 255,
