@@ -110,42 +110,133 @@ class TrafficLightStoplineMapper:
             stopline_data = json.load(f)
 
         # 신호등 위치: {idx: (x, y)}
+        # tl_positions: Dict[str, Tuple[float, float]] = {}
+        # for tl in tl_data:
+        #     tl_positions[tl['idx']] = (tl['point'][0], tl['point'][1])
+
+        # # 정지선 → 시작/끝 꼭짓점 (Roach stopline_vtx 형태)
+        # # 각 정지선의 첫 점과 마지막 점을 stopline 양 끝으로 사용
+        # stopline_vtx_list: List[Tuple[str, List[Tuple[float, float]]]] = []
+        # for sl in stopline_data:
+        #     pts = sl['points']
+        #     if len(pts) < 2:
+        #         continue
+        #     # 정지선의 시작점과 끝점
+        #     p_start = (pts[0][0], pts[0][1])
+        #     p_end = (pts[-1][0], pts[-1][1])
+        #     # 정지선 중심 (매칭용)
+        #     cx = sum(p[0] for p in pts) / len(pts)
+        #     cy = sum(p[1] for p in pts) / len(pts)
+        #     stopline_vtx_list.append((sl['idx'], cx, cy, [p_start, p_end]))
+
+        # # 각 정지선에서 가장 가까운 신호등 찾기 → tl_idx별로 그룹핑
+        # # 결과: {tl_idx: [stopline_vtx, ...]}
+        # self._tl_to_stoplines: Dict[str, List[List[Tuple[float, float]]]] = {}
+        # self._all_tl_positions = tl_positions
+
+        # for sl_idx, cx, cy, vtx in stopline_vtx_list:
+        #     min_dist = float('inf')
+        #     best_tl_idx = None
+        #     for tl_idx, (tx, ty) in tl_positions.items():
+        #         d = np.sqrt((cx - tx) ** 2 + (cy - ty) ** 2)
+        #         if d < min_dist:
+        #             min_dist = d
+        #             best_tl_idx = tl_idx
+        #     if best_tl_idx is not None and min_dist <= max_match_distance:
+        #         if best_tl_idx not in self._tl_to_stoplines:
+        #             self._tl_to_stoplines[best_tl_idx] = []
+        #         self._tl_to_stoplines[best_tl_idx].append(vtx)
+
+        # 신호등 위치: {idx: (x, y)}
         tl_positions: Dict[str, Tuple[float, float]] = {}
         for tl in tl_data:
             tl_positions[tl['idx']] = (tl['point'][0], tl['point'][1])
 
-        # 정지선 → 시작/끝 꼭짓점 (Roach stopline_vtx 형태)
-        # 각 정지선의 첫 점과 마지막 점을 stopline 양 끝으로 사용
-        stopline_vtx_list: List[Tuple[str, List[Tuple[float, float]]]] = []
+        # link_set.json 로드
+        link_json_path = str(Path(tl_json_path).parent / 'link_set.json')
+        with open(link_json_path, 'r', encoding='utf-8') as f:
+            link_data = json.load(f)
+
+        # 링크 끝점 인덱스: {link_idx: (end_x, end_y)}
+        link_endpoints: Dict[str, Tuple[float, float]] = {}
+        for link in link_data:
+            pts = link['points']
+            if len(pts) < 2:
+                continue
+            link_endpoints[link['idx']] = (pts[0][0], pts[0][1])
+
+        # 정지선 정보: [(sl_idx, cx, cy, vtx), ...]
+        stopline_vtx_list = []
         for sl in stopline_data:
             pts = sl['points']
             if len(pts) < 2:
                 continue
-            # 정지선의 시작점과 끝점
             p_start = (pts[0][0], pts[0][1])
-            p_end = (pts[-1][0], pts[-1][1])
-            # 정지선 중심 (매칭용)
+            p_end   = (pts[-1][0], pts[-1][1])
             cx = sum(p[0] for p in pts) / len(pts)
             cy = sum(p[1] for p in pts) / len(pts)
             stopline_vtx_list.append((sl['idx'], cx, cy, [p_start, p_end]))
 
-        # 각 정지선에서 가장 가까운 신호등 찾기 → tl_idx별로 그룹핑
-        # 결과: {tl_idx: [stopline_vtx, ...]}
+        # 수동 매핑 (link_id_list 가 비어있는 신호등)
+        MANUAL_MAPPING = {
+            'C119BS010063': ['B219BS010022'],
+            # 'C119BS010064': ['B219BS010XXX'],  # 확인 후 추가
+        }
+
         self._tl_to_stoplines: Dict[str, List[List[Tuple[float, float]]]] = {}
         self._all_tl_positions = tl_positions
 
-        for sl_idx, cx, cy, vtx in stopline_vtx_list:
+        # 정지선 vtx 빠른 조회용: {sl_idx: vtx}
+        sl_vtx_map = {sl_idx: vtx for sl_idx, cx, cy, vtx in stopline_vtx_list}
+
+        for tl in tl_data:
+            tl_idx = tl['idx']
+            link_id_list = tl.get('link_id_list', [])
+
+            # ── 1) 수동 매핑 우선 ──
+            if tl_idx in MANUAL_MAPPING:
+                matched = []
+                for sl_idx in MANUAL_MAPPING[tl_idx]:
+                    if sl_idx in sl_vtx_map:
+                        matched.append(sl_vtx_map[sl_idx])
+                if matched:
+                    self._tl_to_stoplines[tl_idx] = matched
+                continue
+
+            # ── 2) link_id 기반 매핑 ──
+            if link_id_list:
+                matched = []
+                for link_id in link_id_list:
+                    if link_id not in link_endpoints:
+                        continue
+                    ex, ey = link_endpoints[link_id]
+
+                    # 링크 끝점에서 가장 가까운 정지선 찾기
+                    min_dist = float('inf')
+                    best_vtx = None
+                    for sl_idx, cx, cy, vtx in stopline_vtx_list:
+                        d = np.sqrt((cx - ex) ** 2 + (cy - ey) ** 2)
+                        if d < min_dist:
+                            min_dist = d
+                            best_vtx = vtx
+                    if best_vtx is not None and min_dist <= max_match_distance:
+                        matched.append(best_vtx)
+
+                if matched:
+                    self._tl_to_stoplines[tl_idx] = matched
+                    continue
+
+            # ── 3) fallback: 거리 기반 ──
+            tx, ty = tl_positions[tl_idx]
             min_dist = float('inf')
-            best_tl_idx = None
-            for tl_idx, (tx, ty) in tl_positions.items():
+            best_vtx = None
+            for sl_idx, cx, cy, vtx in stopline_vtx_list:
                 d = np.sqrt((cx - tx) ** 2 + (cy - ty) ** 2)
                 if d < min_dist:
                     min_dist = d
-                    best_tl_idx = tl_idx
-            if best_tl_idx is not None and min_dist <= max_match_distance:
-                if best_tl_idx not in self._tl_to_stoplines:
-                    self._tl_to_stoplines[best_tl_idx] = []
-                self._tl_to_stoplines[best_tl_idx].append(vtx)
+                    best_vtx = vtx
+            if best_vtx is not None and min_dist <= max_match_distance:
+                self._tl_to_stoplines[tl_idx] = [best_vtx]
 
         n_matched = sum(len(v) for v in self._tl_to_stoplines.values())
         n_tl_matched = len(self._tl_to_stoplines)
@@ -802,6 +893,9 @@ class BEVDynamicRenderer:
         Returns:
             (H, W) uint8 마스크 (밝기값으로 상태 구분).
         """
+        print(f'[TL DEBUG] called, cache={list(tl_state_cache.keys())}')  # 추가
+        print(f'[TL DEBUG] ego=({ego_state.pos_x:.1f}, {ego_state.pos_y:.1f})')  # 추가
+        
         mask = np.zeros([self._width, self._width], dtype=np.uint8)
 
         if self._tl_mapper is None:
@@ -811,6 +905,7 @@ class BEVDynamicRenderer:
         nearby = self._tl_mapper.get_nearby_stoplines(
             ego_state.pos_x, ego_state.pos_y, self._tl_dist)
 
+        print(f'[TL DEBUG] nearby={list(nearby.keys())}, cache={list(tl_state_cache.keys())}')
         val_map = {
             'green':  self._tl_green_val,    # 80
             'yellow': self._tl_yellow_val,   # 170

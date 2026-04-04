@@ -42,7 +42,7 @@ detection:
   pedestrian_distance: 15
   vehicle_max_count: 20
   pedestrian_max_count: 20
-  traffic_light_distance: 80
+  traffic_light_distance: 40 
   stop_sign_distance: 10
 
 # 경로 설정

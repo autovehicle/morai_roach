@@ -930,7 +930,7 @@
   },
   {
     "idx": "C119BS010063",
-    "link_id_list": [],
+    "link_id_list": ["A219BS010634"], 
     "road_id": "",
     "type": "car",
     "sub_type": [
@@ -1124,7 +1124,8 @@
     "link_id_list": [
       "A219BS010615",
       "A219BS010616",
-      "A219BS010617"
+      "A219BS010617",
+      "A219BS010618" 
     ],
     "road_id": "",
     "type": "car",
