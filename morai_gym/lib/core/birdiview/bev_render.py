@@ -34,6 +34,7 @@ Roach 논문 (carla-roach)의 chauffeurnet.py BEV 표현 방식을 그대로 따
   - 정적 데이터(도로, 경로, 차선)는 현재 미구현 (시뮬레이션 측 이슈)
 """
 
+
 import json
 import numpy as np
 import cv2 as cv
@@ -146,6 +147,24 @@ class TrafficLightStoplineMapper:
         #         if best_tl_idx not in self._tl_to_stoplines:
         #             self._tl_to_stoplines[best_tl_idx] = []
         #         self._tl_to_stoplines[best_tl_idx].append(vtx)
+
+# ═══════════════════════════════════════════════════════════════════
+        # >>>>>>>>>>>> 변경된 매핑 로직 <<<<<<<<<<<<<<<<<<
+        # 신호등 ↔ 정지선 매핑 (우선순위 3단계)
+        #
+        # 1순위: 수동 매핑
+        #   - link_id_list 가 없는 신호등을 직접 지정
+        #   - ex) C119BS010063 → B219BS010022
+        #
+        # 2순위: link_id 기반 매핑
+        #   - 신호등이 주도권을 가짐
+        #   - 신호등 → link_id_list 의 링크 시작점 → 시작점 근처 정지선에 매핑
+        #   - 기존(거리 기반)과 다른 점: 신호등이 직접 자기 링크를 통해 정지선을 찾음
+        #
+        # 3순위: 거리 기반 fallback
+        #   - 1, 2순위 모두 실패했을 때만 사용
+        #   - 신호등 위치 기준 가장 가까운 정지선
+# ═══════════════════════════════════════════════════════════════════
 
         # 신호등 위치: {idx: (x, y)}
         tl_positions: Dict[str, Tuple[float, float]] = {}
