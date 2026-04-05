@@ -1,0 +1,29 @@
+defaults:
+  - agent: ppo
+  - agent/ppo/policy: xtma_beta
+  - agent/ppo/training: ppo
+  - agent/ppo/obs_configs: birdview
+  # 원하는 맵 로드할 수 있도록 하기 (ex: morai_katri)
+  - train_envs: morai_katri
+actors:
+  hero:
+    agent: ppo
+    reward:
+      entry_point: reward.valeo_action:ValeoAction
+      kwargs: {}
+    terminal:
+      entry_point: terminal.valeo_no_det_px:ValeoNoDetPx
+      kwargs: {}
+ev_id: hero
+#morai 환경으로 변경
+# carla_sh_path: /home/ubuntu/apps/carla/carla910/CarlaUE4.sh
+total_timesteps: 1e8
+seed: 2021
+# 필요없는 코드
+# kill_running: true
+dummy: true
+wb_project: train_rl
+wb_name: null
+wb_notes: null
+wb_tags: null
+curriculum: false
