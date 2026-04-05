@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "morai-roach"
+version = "0.1.0"
+description = "Roach (ICCV 2021) pipeline port for MORAI SIM — KATRI map, Windows/Python 3.8"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.19.1,<1.20",
+    "opencv-python>=4.5",
+    "PyYAML>=5.4",
+    "h5py>=3.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["morai_gym*", "network*"]

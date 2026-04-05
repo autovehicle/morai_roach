@@ -72,3 +72,6 @@ temp/
 
 # Jupyter Notebook
 .ipynb_checkpoints/
+
+# setuptools / pip editable install
+*.egg-info/

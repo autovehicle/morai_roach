@@ -1,0 +1,6 @@
+# Python 3.8 (팀 고정) — conda morai 환경에서:
+# pip install -r requirements.txt
+numpy==1.19.1
+opencv-python
+PyYAML
+h5py

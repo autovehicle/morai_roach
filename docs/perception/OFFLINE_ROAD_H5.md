@@ -3,7 +3,7 @@
 ## 목적
 
 - **실시간**에 `link_set.json` 을 매 프레임 파싱해 그리는 비용을 없애고, CARLA Roach와 같이 **시뮬 전에 한 번** 맵 래스터를 굽는다.
-- 산출물은 `bev_render` 가 읽는 **`morai_kcity_map.h5`** 의 `road` 데이터셋과 HDF5 attrs (`pixels_per_meter`, `world_offset_in_meters`, …).
+- 산출물은 `bev_render` 가 읽는 **`morai_katri_map.h5`** 의 `road` 데이터셋과 HDF5 attrs (`pixels_per_meter`, `world_offset_in_meters`, …).
 
 ## 실행 (Windows CMD, conda)
 
@@ -14,7 +14,7 @@ python -m morai_gym.utils.birdview_map
 ```
 
 기본 입력: `morai_gym/core/obs_manager/birdview/map/link_set.json`  
-기본 출력: `morai_gym/core/obs_manager/birdview/map/morai_kcity_map.h5`
+기본 출력: `morai_gym/core/obs_manager/birdview/map/morai_katri_map.h5`
 
 옵션 예:
 
@@ -35,10 +35,11 @@ python -m morai_gym.utils.birdview_map --pixels_per_meter 5.0 --margin_m 100 --l
 |------|------|
 | carla-roach `carla_gym/utils/birdview_map.py` | H5 attrs, gzip, `road` 레이어 의미 |
 | MORAI-MGeoModule `subproc_load_link_ver2.py` | `link_set` 필드(`points`, `width_start`, …) |
-| morai-roach `link_set.json` | K-city 링크 geometry |
+| morai-roach `link_set.json` | KATRI 링크 geometry |
 
 ## 변경 이력
 
 | 날짜 | 내용 |
 |------|------|
 | 2026-04-05 | `morai_gym/utils/birdview_map.py` 최초 추가, 문서 작성 |
+| 2026-04-05 | 실험 맵 명칭 **KATRI** 반영, 기본 출력 파일명 `morai_katri_map.h5` (구 `morai_kcity_map.h5` 사용 시 이름 변경 또는 재베이크) |

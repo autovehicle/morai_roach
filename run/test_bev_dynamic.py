@@ -26,21 +26,15 @@ import numpy as np
 import cv2 as cv
 
 from network.UDP.udp_manager import UdpManager
-from morai_gym.lib.core.birdiview.map_to_h5 import Config
-from morai_gym.lib.core.birdiview.bev_render import BEVDynamicRenderer
+from network.UDP.protocol import EgoState
+from morai_gym.core.obs_manager.birdview.map_to_h5 import Config
+from morai_gym.core.obs_manager.birdview.bev_render import BEVDynamicRenderer
 
 
 def test_lane_rendering():
     """MORAI 없이 차선 렌더링만 테스트."""
-    
-    # 더미 ego_state (원점 근처)
-    class DummyEgo:
-        def __init__(self):
-            self.pos_x = 0.0
-            self.pos_y = 0.0
-            self.yaw = 0.0
-    
-    ego = DummyEgo()
+
+    ego = EgoState(pos_x=0.0, pos_y=0.0, yaw=0.0)
     
     # Config 로드
     config = Config(project_root)
@@ -103,7 +97,7 @@ def main():
             )
 
             rendered = result['rendered']   # (192, 192, 3) RGB
-            masks = result['masks']         # (12, 192, 192) uint8
+            masks = result['masks']         # (15, 192, 192) uint8 — K=4 기본
 
             # ── 시각화 (확대 표시) ──
             display_size = 512 
@@ -130,28 +124,25 @@ def main():
 
             cv.imshow('BEV Dynamic Objects', display)
 
-            # ── 개별 채널 시각화 (선택적) ──
-            n_hist = len(renderer._history_idx)
+            # ── 개별 채널 시각화 — carla 순서: road, route, lane, veh×K, ped×K, tl×K ──
+            k = len(renderer._history_idx)
+            road_m = masks[0]
+            route_m = masks[1]
+            lane_m = masks[2]
+            veh_latest = masks[3 + k - 1]
+            ped_latest = masks[3 + 2 * k - 1]
+            tl_latest = masks[3 + 3 * k - 1]
 
-            # 최신 프레임의 차량/보행자/신호등/차선 마스크
-            veh_mask = masks[n_hist - 1]        # 가장 최근 차량
-            ped_mask = masks[2 * n_hist - 1]    # 가장 최근 보행자
-            tl_mask = masks[3 * n_hist - 1]     # 가장 최근 신호등
-            lane_mask = masks[3 * n_hist] if masks.shape[0] > 3 * n_hist else np.zeros_like(veh_mask)
-
-            channel_display = np.hstack([veh_mask, ped_mask, tl_mask, lane_mask])
+            channel_display = np.hstack(
+                [road_m, route_m, lane_m, veh_latest, ped_latest, tl_latest])
             channel_display = cv.resize(
-                channel_display, (display_size * 4, display_size),
+                channel_display, (display_size * 6, display_size),
                 interpolation=cv.INTER_NEAREST)
-            cv.putText(channel_display, 'Vehicle', (10, 20),
-                       cv.FONT_HERSHEY_SIMPLEX, 0.5, (255,), 1)
-            cv.putText(channel_display, 'Pedestrian', (display_size + 10, 20),
-                       cv.FONT_HERSHEY_SIMPLEX, 0.5, (255,), 1)
-            cv.putText(channel_display, 'Traffic Light', (display_size * 2 + 10, 20),
-                       cv.FONT_HERSHEY_SIMPLEX, 0.5, (255,), 1)
-            cv.putText(channel_display, 'Lane', (display_size * 3 + 10, 20),
-                       cv.FONT_HERSHEY_SIMPLEX, 0.5, (255,), 1)
-            cv.imshow('BEV Channels (latest)', channel_display)
+            labels = ['Road', 'Route', 'Lane', 'Veh', 'Ped', 'TL']
+            for i, lab in enumerate(labels):
+                cv.putText(channel_display, lab, (display_size * i + 10, 20),
+                           cv.FONT_HERSHEY_SIMPLEX, 0.45, (255,), 1)
+            cv.imshow('BEV Channels (carla order)', channel_display)
 
             # ── 키 입력 처리 ──
             key = cv.waitKey(100) & 0xFF

@@ -3,15 +3,8 @@
 **알파프로젝트1** — [Roach (ICCV 2021)](https://arxiv.org/abs/2108.08265)의 CARLA 기반 강화학습 교사·학생 파이프라인을 **MORAI SIM (Windows)** 으로 옮기는 팀 저장소입니다.
 
 - 논문 공식 코드: [zhejz/carla-roach](https://github.com/zhejz/carla-roach)
-- **범위**: **K-city** 단일 맵, Python **3.8** 고정
+- **범위**: **KATRI** 맵 기준 실험, Python **3.8** 고정
 - **팀**: 인지 3명 / 판단·제어 3명 (역할은 아래 표 참고)
-
----
-
-## Cursor에서 AI가 파일을 직접 수정하게 하려면
-
-1. 채팅을 **Agent 모드**로 두고 질문합니다.
-2. 터미널/저장소 쓰기가 막히면(샌드박스) 해당 명령에 **전체 권한(all)** 이 필요합니다. Cursor에서 터미널/도구 실행 시 뜨는 권한 승인을 허용하면 이동·설치·대량 편집이 가능합니다.
 
 ---
 
@@ -109,7 +102,7 @@ python -m morai_gym.utils.birdview_map
 
 ## 빠른 실행 (BEV 테스트)
 
-1. MORAI SIM 실행, **K-city** 시나리오 로드.  
+1. MORAI SIM 실행, **KATRI** 맵 시나리오 로드.  
 2. 저장소 루트에서 (conda `morai` 활성화 후):
 
 ```cmd
@@ -124,12 +117,12 @@ python run\test_bev_dynamic.py --test-lane
 
 ---
 
-## K-city 맵 에셋
+## KATRI 맵 에셋
 
 | 종류 | 경로 |
 |------|------|
 | JSON | `morai_gym/core/obs_manager/birdview/map/` (`lane_marking_set.json`, `link_set.json`, `traffic_light_set.json`, `stoplane_marking_set.json`) |
-| H5 (선택) | `morai_gym/core/obs_manager/birdview/map/morai_kcity_map.h5` — `birdview.yaml` 의 `h5_path` 와 일치 |
+| H5 (선택) | `morai_gym/core/obs_manager/birdview/map/morai_katri_map.h5` — `birdview.yaml` 의 `h5_path` 와 일치 |
 
 [MORAI-MGeoModule](https://github.com/MORAI-Autonomous/MORAI-MGeoModule) 등은 **참고만** 하고, 필요한 코드만 이 저장소로 옮기고 **출처·라이선스**를 명시합니다.
 

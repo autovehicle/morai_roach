@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MORAI K-city (및 동일 포맷) link_set.json 으로부터 Roach/CARLA 호환 **road** 래스터를
+MORAI KATRI 맵 (및 동일 포맷) `link_set.json` 으로부터 Roach/CARLA 호환 **road** 래스터를
 **오프라인에서 한 번만** 생성해 HDF5로 저장한다.
 
 설계 철학 (논문 코드와의 정합)
@@ -225,7 +225,7 @@ def main() -> None:
         '--output',
         type=Path,
         default=None,
-        help='출력 H5 (기본: morai_gym/.../birdview/map/morai_kcity_map.h5)',
+        help='출력 H5 (기본: morai_gym/.../birdview/map/morai_katri_map.h5)',
     )
     parser.add_argument('--pixels_per_meter', type=float, default=5.0)
     parser.add_argument('--margin_m', type=float, default=100.0)
@@ -237,7 +237,7 @@ def main() -> None:
         repo / 'morai_gym' / 'core' / 'obs_manager' / 'birdview' / 'map' / 'link_set.json'
     )
     default_out = (
-        repo / 'morai_gym' / 'core' / 'obs_manager' / 'birdview' / 'map' / 'morai_kcity_map.h5'
+        repo / 'morai_gym' / 'core' / 'obs_manager' / 'birdview' / 'map' / 'morai_katri_map.h5'
     )
 
     link_json = args.link_json or default_link
