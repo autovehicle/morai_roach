@@ -14,6 +14,7 @@ MORAI 시뮬레이터에 연결하여 차량, 보행자, 신호등 데이터를
        s: 현재 프레임 저장 (rendered + masks)
 """
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -61,6 +62,8 @@ def test_lane_rendering():
 
 def main():
     # ── config 경로 로드 (birdview.yaml) ──
+    if os.environ.get('MORAI_BEV_DEBUG', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+        print('[test_bev_dynamic] MORAI_BEV_DEBUG=1 — 콘솔에 [MORAI_BEV_DEBUG:...] 로그가 출력됩니다.')
     config = Config(project_root)
 
     # ── 1) UDP 매니저 시작 ──
@@ -98,6 +101,7 @@ def main():
 
             rendered = result['rendered']   # (192, 192, 3) RGB
             masks = result['masks']         # (15, 192, 192) uint8 — K=4 기본
+            collision_px = result.get('collision_px', False)
 
             # ── 시각화 (확대 표시) ──
             display_size = 512 
@@ -117,6 +121,7 @@ def main():
                 f'Frame: {frame_count}',
                 f'Ego: ({ego.pos_x:.1f}, {ego.pos_y:.1f}) yaw={ego.yaw:.1f}',
                 f'Vehicles: {n_veh}  Peds: {n_ped}  TL: {tl_str}',
+                f'collision_px (carla): {collision_px}',
             ]
             for i, line in enumerate(info_lines):
                 cv.putText(display, line, (10, 20 + i * 20),

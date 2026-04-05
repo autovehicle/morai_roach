@@ -63,7 +63,20 @@ class Config:
         self.output_dir = str(self.root / col['output_dir'])
         self.max_steps = int(col['max_steps_per_episode'])
         self.sim_hz = int(col['sim_hz'])
- 
+
+        try:
+            from morai_gym.core.obs_manager.birdview.bev_debug import morai_bev_dlog
+            morai_bev_dlog(
+                'config',
+                'birdview w=%d ev_bottom=%d ppm=%.3f hist=%s scale_bbox=%s scale_mask_col=%s '
+                'veh_dist=%.1f ped_dist=%.1f h5=%s',
+                self.width, self.ev_to_bottom, self.ppm, self.history_idx,
+                self.scale_bbox, self.scale_mask_col, self.veh_dist, self.ped_dist,
+                getattr(self, 'static_h5', ''),
+            )
+        except Exception:
+            pass
+
         # --------- ipconfig.json ----------
         net_path = self.root / 'network' / 'ipconfig.json'
         if not net_path.exists():

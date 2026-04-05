@@ -30,6 +30,9 @@ Roach 논문 (carla-roach)의 chauffeurnet.py BEV 표현 방식을 그대로 따
           H5가 없으면 해당 채널은 0.
   - route: update(..., route_world_xy=) 로 주입한 웨이포인트(세계 좌표) 폴리라인. 없으면 0.
   - lane: JSON 차선(실선 255 / 점선 120).
+  - rendered RGB: chauffeurnet.py와 동일 — road(ALUMINIUM_5) → route(ALUMINIUM_3) →
+    lane(실선 MAGENTA / 점선 MAGENTA_2) → TL → 차량 → 보행자 → ego(흰색).
+    link_set 핑크 배경은 CARLA에 없어 시각화에서 제외.
 
 좌표계 가정 (MORAI):
   - 세계 좌표: x=동쪽(East), y=북쪽(North)  [ENU 좌표계]
@@ -37,6 +40,12 @@ Roach 논문 (carla-roach)의 chauffeurnet.py BEV 표현 방식을 그대로 따
   - H5 road 워핑은 CARLA와 같이 맵 픽셀 + world_offset_in_meters 를 사용한다.
 
 설치: 저장소 루트에서 pip install -e . (network, morai_gym import)
+
+디버그 (상태 공유용):
+  MORAI_BEV_DEBUG=1 — bev_debug.dlog / Config 로드 / renderer_init / H5 / update 요약 출력
+  MORAI_BEV_DEBUG_EVERY=N — update 요약을 N 프레임마다 (기본 1)
+
+H5 road 베이킹: ``birdview_map.world_to_pixel_carla`` 수정 후에는 ``morai_katri_map.h5`` 를 반드시 다시 생성한다.
 """
 
 from __future__ import annotations
@@ -51,6 +60,12 @@ from typing import List, Optional, Dict, Tuple
 
 from pathlib import Path
 
+from morai_gym.core.obs_manager.birdview.bev_debug import (
+    morai_bev_dlog,
+    morai_bev_debug_enabled,
+    morai_bev_debug_every_n,
+)
+
 from network.UDP.protocol import (
     ObjectData, TrafficLightData, EgoState,
     OBJ_TYPE_VEHICLE, OBJ_TYPE_PEDESTRIAN,
@@ -61,17 +76,19 @@ from network.UDP.protocol import (
 )
 
 # ═══════════════════════════════════════════════════════════════════
-# 시각화용 색상 (Roach 원본과 동일, RGB 순서)
+# 시각화용 색상 — carla_gym/.../chauffeurnet.py 와 동일 (RGB 튜플)
 # ═══════════════════════════════════════════════════════════════════
 COLOR_BLACK = (0, 0, 0)
-COLOR_BLUE = (0, 0, 255)        # 차량
-COLOR_CYAN = (0, 255, 255)      # 보행자
-COLOR_GREEN = (0, 255, 0)       # 신호등 - 녹색
-COLOR_YELLOW = (255, 255, 0)    # 신호등 - 황색
-COLOR_RED = (255, 0, 0)         # 신호등 - 적색
-COLOR_WHITE = (255, 255, 255)   # 실선(Solid)
-COLOR_GRAY = (120, 120, 120)    # 점선(Broken/Dashed)
-COLOR_EGO = (200, 255, 200)     # Ego 차량 (연한 초록색, 실선과 구분)
+COLOR_RED = (255, 0, 0)
+COLOR_GREEN = (0, 255, 0)
+COLOR_BLUE = (0, 0, 255)
+COLOR_CYAN = (0, 255, 255)
+COLOR_MAGENTA = (255, 0, 255)
+COLOR_MAGENTA_2 = (255, 140, 255)
+COLOR_YELLOW = (255, 255, 0)
+COLOR_WHITE = (255, 255, 255)
+COLOR_ALUMINIUM_3 = (136, 138, 133)   # route
+COLOR_ALUMINIUM_5 = (46, 52, 54)      # road
 
 
 def _tint(color, factor):
@@ -205,7 +222,8 @@ class BEVDynamicRenderer:
             ego_state, vehicle_list, pedestrian_list, traffic_light,
             route_world_xy=optional_Nx2_array,
         )
-        result['masks']  # (15, H, W) uint8 — K=4 기본
+        result['masks']   # (15, H, W) uint8 — K=4 기본
+        result['collision_px']  # bool — chauffeurnet과 동일 의미
     """
 
     def __init__(
@@ -236,6 +254,7 @@ class BEVDynamicRenderer:
         static_h5_path: Optional[str] = None,
         max_route_waypoints: int = 80,
         route_line_thickness: int = 16,
+        scale_mask_col: float = 1.0,
     ):
         """
         Args:
@@ -255,6 +274,7 @@ class BEVDynamicRenderer:
             default_veh_size: MORAI에서 크기 미제공 시 기본 차량 크기 (length, width) meters.
             default_ped_size: MORAI에서 크기 미제공 시 기본 보행자 크기 (length, width) meters.
             tl_mapper: 신호등 ↔ 정지선 매퍼. None이면 stopline 렌더링 비활성화.
+            scale_mask_col: chauffeurnet collision_px용 ego bbox 확대 (기본 1.0, carla ppo yaml).
         """
         self._width = width
         self._ev_to_bottom = pixels_ev_to_bottom
@@ -302,7 +322,27 @@ class BEVDynamicRenderer:
         self._h5_road: Optional[np.ndarray] = None
         self._h5_world_offset: Optional[np.ndarray] = None
         self._road_ppm: float = float(pixels_per_meter)
+        self._scale_mask_col = float(scale_mask_col)
+        self._debug_update_i = 0
         self._try_load_static_h5(static_h5_path)
+
+        morai_bev_dlog(
+            'renderer_init',
+            'w=%d ev_bottom=%d ppm=%.4f road_ppm=%.4f hist=%s scale_bbox=%s '
+            'scale_mask_col=%s walker_scale(when not scale_bbox)=%s '
+            'h5_ok=%s h5_shape=%s offset=%s',
+            self._width,
+            self._ev_to_bottom,
+            self._ppm,
+            self._road_ppm,
+            self._history_idx,
+            self._scale_bbox,
+            self._scale_mask_col,
+            self._walker_scale,
+            self._h5_road is not None,
+            None if self._h5_road is None else repr(self._h5_road.shape),
+            None if self._h5_world_offset is None else self._h5_world_offset.tolist(),
+        )
 
     def _try_load_static_h5(self, static_h5_path: Optional[str]) -> None:
         if not static_h5_path:
@@ -320,12 +360,24 @@ class BEVDynamicRenderer:
                 self._h5_world_offset = np.array(
                     hf.attrs['world_offset_in_meters'], dtype=np.float32)
                 self._road_ppm = float(hf.attrs.get('pixels_per_meter', self._ppm))
+                wpx = hf.attrs.get('width_in_pixels', '?')
+                wm = hf.attrs.get('width_in_meters', '?')
             if not np.isclose(self._road_ppm, self._ppm, rtol=0.01, atol=0.01):
                 print(
                     f'[BEVDynamicRenderer] WARNING: H5 pixels_per_meter={self._road_ppm} '
                     f'!= config {self._ppm} — road 워핑은 H5 기준 ppm 사용'
                 )
             print(f'[BEVDynamicRenderer] Static road H5 로드: {p}')
+            morai_bev_dlog(
+                'h5',
+                'road nonzero=%d / %d attrs ppm=%s width_px=%s width_m=%s offset=%s',
+                int(np.count_nonzero(self._h5_road)),
+                int(self._h5_road.size),
+                str(self._road_ppm),
+                str(wpx),
+                str(wm),
+                self._h5_world_offset.tolist(),
+            )
         except Exception as e:
             print(f'[BEVDynamicRenderer] WARNING: H5 로드 실패 — road=0: {e}')
             self._h5_road = None
@@ -448,6 +500,7 @@ class BEVDynamicRenderer:
             static_h5_path=getattr(config, 'static_h5', None),
             max_route_waypoints=config.max_wps,
             route_line_thickness=config.route_thick,
+            scale_mask_col=config.scale_mask_col,
         )
 
     # ═══════════════════════════════════════════════════════════════
@@ -476,15 +529,21 @@ class BEVDynamicRenderer:
                 'rendered': (H, W, 3) uint8 — RGB 시각화 이미지.
                 'masks': (3 + 3*K, H, W) uint8 — K=len(history_idx).
                     순서: road, route, lane, vehicle×K, walker×K, tl×K.
+                'collision_px': bool — chauffeurnet: ev_mask_col & walker_masks[-1].
         """
-        # ── 1) 거리 기반 필터링 ──
+        # ── 1) 거리 기반 필터링 (chauffeurnet is_within_distance와 동일 박스) ──
         vehicles = self._filter_by_distance(
             vehicle_list, ego_state, self._veh_dist)
         pedestrians = self._filter_by_distance(
             pedestrian_list, ego_state, self._ped_dist)
 
-        # ── 2) 보행자 bbox 스케일링 (Roach 원본: 2.0×) ──
-        if self._walker_scale != 1.0:
+        # ── 2) bbox 스케일 — chauffeurnet get_observation
+        #   scale_bbox True: 차량 scale 1.0, 보행자 2.0 + half-extent 최소 0.8m
+        #   scale_bbox False: 보행자만 walker_scale (레거시 MORAI)
+        if self._scale_bbox:
+            vehicles = [self._carla_scale_actor_bbox(o, 1.0) for o in vehicles]
+            pedestrians = [self._carla_scale_actor_bbox(o, 2.0) for o in pedestrians]
+        elif self._walker_scale != 1.0:
             pedestrians = self._scale_objects(pedestrians, self._walker_scale)
 
         # ── 3) 신호등 상태 캐시 업데이트 ──
@@ -515,12 +574,10 @@ class BEVDynamicRenderer:
             ego_state, M_warp, route_world_xy)
         c_lane = self._get_lane_mask(ego_state)
 
-        # ── 7-1) 도로 링크 — RGB 시각화 전용 (masks에는 미포함, CARLA와 동일 15채널 유지)
-        link_mask = self._get_link_mask(ego_state)
-
         rendered = self._render_rgb(
-            vehicle_masks, walker_masks, tl_masks, lane_mask=c_lane,
-            link_mask=link_mask, ego_state=ego_state, M_warp=M_warp)
+            vehicle_masks, walker_masks, tl_masks,
+            c_road, c_route, c_lane,
+            ego_state=ego_state, M_warp=M_warp)
 
         # ── 8) masks: road, route, lane, vehicles..., walkers..., tls...
         c_vehicle = [m.astype(np.uint8) * 255 for m in vehicle_masks]
@@ -532,7 +589,38 @@ class BEVDynamicRenderer:
             axis=0)
         assert masks.shape[0] == 3 + 3 * k, (masks.shape[0], k)
 
-        return {'rendered': rendered, 'masks': masks}
+        ego_mask_col = self._render_ego_mask(
+            ego_state, M_warp, bbox_scale=self._scale_mask_col)
+        collision_px = False
+        if walker_masks:
+            collision_px = bool(np.any(ego_mask_col & walker_masks[-1]))
+
+        self._debug_update_i += 1
+        if morai_bev_debug_enabled() and (
+                self._debug_update_i % morai_bev_debug_every_n() == 0):
+            morai_bev_dlog(
+                'update',
+                'frame=%d ego=(%.2f,%.2f) yaw=%.2f n_veh=%d n_ped=%d '
+                'sum_road=%d sum_route=%d sum_lane=%d collision_px=%s '
+                'tl_cache_keys=%d',
+                self._debug_update_i,
+                ego_state.pos_x,
+                ego_state.pos_y,
+                ego_state.yaw,
+                len(vehicles),
+                len(pedestrians),
+                int(np.sum(c_road > 0)),
+                int(np.sum(c_route > 0)),
+                int(np.sum(c_lane > 0)),
+                collision_px,
+                len(self._tl_state_cache),
+            )
+
+        return {
+            'rendered': rendered,
+            'masks': masks,
+            'collision_px': collision_px,
+        }
 
     def reset(self):
         """히스토리 큐와 신호등 캐시를 초기화한다. 에피소드 시작 시 호출."""
@@ -652,46 +740,6 @@ class BEVDynamicRenderer:
             )
 
         return mask
-    
-    def _get_link_mask(self, ego_state: EgoState):
-
-        mask = np.zeros([self._width, self._width], dtype=np.uint8)
-        if not self._link_data or ego_state is None:
-            return mask
-
-        M_warp = self._get_warp_transform(
-            ego_state.pos_x, ego_state.pos_y, ego_state.yaw)
-
-        for link in self._link_data:
-            pts = link['points']
-            dist = np.sqrt((pts[:, 0] - ego_state.pos_x) ** 2 +
-                        (pts[:, 1] - ego_state.pos_y) ** 2)
-            pts_in_range = pts[dist <= self._link_max_range]
-            if pts_in_range.shape[0] < 2:
-                continue
-
-            pts_xy = pts_in_range[:, :2].reshape(-1, 1, 2).astype(np.float32)
-            pts_bev = cv.transform(pts_xy, M_warp)
-            pts_bev = np.ascontiguousarray(np.round(pts_bev).astype(np.int32))
-
-            # link_type별 밝기값 구분
-            lt = link.get('link_type')
-            if lt == '1':
-                val = 200
-            elif lt == '6':
-                val = 140
-            else:
-                val = 100
-
-            cv.polylines(
-                mask,
-                [pts_bev],
-                isClosed=False,
-                color=int(val),
-                thickness=self._link_thickness,
-            )
-
-        return mask
 
     # ═══════════════════════════════════════════════════════════════
     # 좌표 변환
@@ -708,10 +756,10 @@ class BEVDynamicRenderer:
         """
         yaw = np.deg2rad(ego_yaw_deg)
 
-        # Ego의 전방 벡터, 우측 벡터 (세계 좌표)
+        # Ego의 전방·우측 단위벡터 — chauffeurnet._get_warp_transform 과 동일 (yaw + pi/2)
         forward_vec = np.array([np.cos(yaw), np.sin(yaw)])
-        right_vec = np.array([np.cos(yaw - 0.5 * np.pi),
-                              np.sin(yaw - 0.5 * np.pi)])
+        right_vec = np.array([np.cos(yaw + 0.5 * np.pi),
+                              np.sin(yaw + 0.5 * np.pi)])
 
         mpp = 1.0 / self._ppm  # meters per pixel
         ego_pos = np.array([ego_x, ego_y])
@@ -977,19 +1025,30 @@ class BEVDynamicRenderer:
     # 유틸리티
     # ═══════════════════════════════════════════════════════════════
 
+    def _carla_scale_actor_bbox(self, obj: ObjectData, scale: float) -> ObjectData:
+        """chauffeurnet._get_surrounding_actors(..., scale): half-extent에 scale 후 min 0.8m."""
+        d = (self._default_veh_size if obj.obj_type == OBJ_TYPE_VEHICLE
+             else self._default_ped_size)
+        if obj.size_x > 0 and obj.size_y > 0:
+            hx = obj.size_x / 2.0
+            hy = obj.size_y / 2.0
+        else:
+            hx = d[0] / 2.0
+            hy = d[1] / 2.0
+        hx = max(hx * scale, 0.8)
+        hy = max(hy * scale, 0.8)
+        return replace(obj, size_x=hx * 2.0, size_y=hy * 2.0)
+
     def _filter_by_distance(self, obj_list: List[ObjectData],
                             ego: EgoState, max_dist: float):
-        """Ego로부터 max_dist(m) 이내 객체만 필터링한다.
-
-        Roach chauffeurnet.py의 is_within_distance()와 동일한 로직:
-          - x, y 각각 독립적으로 거리 체크 (맨해튼 거리)
-          - Ego 자신은 제외 (1m 이내)
-        """
+        """chauffeurnet is_within_distance: |dx|,|dy|<max_dist, |dz|<8, ego 1m 박스 제외."""
         filtered = []
         for obj in obj_list:
             dx = abs(obj.pos_x - ego.pos_x)
             dy = abs(obj.pos_y - ego.pos_y)
-            # 거리 이내이고, ego 자신이 아닌 경우
+            dz = abs(obj.pos_z - ego.pos_z)
+            if dz >= 8.0:
+                continue
             if dx < max_dist and dy < max_dist and not (dx < 1.0 and dy < 1.0):
                 filtered.append(obj)
         return filtered
@@ -1012,12 +1071,16 @@ class BEVDynamicRenderer:
     # RGB 시각화 렌더링
     # ═══════════════════════════════════════════════════════════════
 
-    def _render_ego_mask(self, ego_state: EgoState, M_warp):
-        """Ego 차량 바운딩 박스를 BEV 마스크에 렌더링한다."""
+    def _render_ego_mask(
+            self, ego_state: EgoState, M_warp,
+            bbox_scale: float = 1.0):
+        """Ego 차량 BEV 마스크. bbox_scale=scale_mask_col 시 chauffeurnet ev_mask_col."""
         mask = np.zeros([self._width, self._width], dtype=np.uint8)
 
         half_x = ego_state.size_x / 2.0 if ego_state.size_x > 0 else 2.25
         half_y = ego_state.size_y / 2.0 if ego_state.size_y > 0 else 1.0
+        half_x *= float(bbox_scale)
+        half_y *= float(bbox_scale)
 
         # 5각형 (차량과 동일한 pointed front)
         corners_local = np.array([
@@ -1047,30 +1110,27 @@ class BEVDynamicRenderer:
         return mask.astype(bool)
 
     def _render_rgb(self, vehicle_masks, walker_masks, tl_masks,
-                    lane_mask, link_mask, ego_state, M_warp):
-        """디버깅/시각화용 RGB 이미지를 렌더링한다.
+                    road_u8, route_u8, lane_u8, ego_state, M_warp):
+        """디버깅/시각화용 RGB. carla chauffeurnet.py render 블록과 동일 순서·색.
 
-        Roach chauffeurnet.py의 렌더링 순서와 색상을 그대로 따름:
-          - 신호등: green / yellow / red (히스토리: 점점 밝게)
-          - 차량: 파란색 (히스토리: 점점 밝게)
-          - 보행자: 시안색 (히스토리: 점점 밝게)
-          - Ego: 흰색
+        순서: road → route → lane(all/broken) → TL → vehicles → walkers → ego.
+        (CARLA의 stop_sign 마스크는 MORAI에 없어 생략.)
         """
         image = np.zeros([self._width, self._width, 3], dtype=np.uint8)
 
+        if road_u8 is not None:
+            image[road_u8 > 0] = COLOR_ALUMINIUM_5
+        if route_u8 is not None:
+            image[route_u8 > 0] = COLOR_ALUMINIUM_3
+
+        if lane_u8 is not None and np.any(lane_u8):
+            solid_mask = (lane_u8 == self._lane_solid_value)
+            broken_mask = (lane_u8 == self._lane_broken_value)
+            image[solid_mask] = COLOR_MAGENTA
+            image[broken_mask] = COLOR_MAGENTA_2
+
         h_len = len(self._history_idx) - 1
 
-        # 도로 링크 (배경 시각화)
-        if link_mask is not None and np.any(link_mask):
-            # link_type별 색상 구분
-            type1_mask = (link_mask == 200)
-            type6_mask = (link_mask == 140)
-            other_mask = (link_mask == 100)
-            image[type1_mask] = (255, 105, 180)   # 일반 도로: 핫핑크
-            image[type6_mask] = (255, 182, 193)   # 교차로: 라이트핑크
-            image[other_mask] = (219, 112, 147)   # 미분류: 팔레 바이올렛 레드
-
-        # 신호등 (밝기값으로 상태 구분)
         for i, tl_mask in enumerate(tl_masks):
             factor = (h_len - i) * 0.2
             green_area = tl_mask == self._tl_green_val
@@ -1083,26 +1143,15 @@ class BEVDynamicRenderer:
             if np.any(red_area):
                 image[red_area] = _tint(COLOR_RED, factor)
 
-        # 차량 (파란색, 히스토리: 과거→현재 점점 진해짐)
         for i, mask in enumerate(vehicle_masks):
             if np.any(mask):
                 image[mask] = _tint(COLOR_BLUE, (h_len - i) * 0.2)
 
-        # 보행자 (시안색)
         for i, mask in enumerate(walker_masks):
             if np.any(mask):
                 image[mask] = _tint(COLOR_CYAN, (h_len - i) * 0.2)
 
-        # 차선 (CARLA Roach 명세: 실선=흰색, 점선=회색)
-        if lane_mask is not None and np.any(lane_mask):
-            solid_mask = (lane_mask == self._lane_solid_value)
-            broken_mask = (lane_mask == self._lane_broken_value)
-            image[solid_mask] = COLOR_WHITE       # Solid: 255, 255, 255
-            image[broken_mask] = COLOR_GRAY       # Broken: 120, 120, 120
-
-        # Ego 차량 (연한 초록색) - 최상단
-        # 실선(흰색)과 구분하기 위해 다른 색 사용
-        ego_mask = self._render_ego_mask(ego_state, M_warp)
-        image[ego_mask] = COLOR_EGO
+        ego_mask = self._render_ego_mask(ego_state, M_warp, bbox_scale=1.0)
+        image[ego_mask] = COLOR_WHITE
 
         return image

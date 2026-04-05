@@ -18,11 +18,10 @@ H5 출력 규약 (``bev_render.BEVDynamicRenderer._try_load_static_h5`` / carla 
 - 속성 ``world_offset_in_meters``: float32 shape ``(2,)`` — 맵 좌하단(최소 x, 최소 y) 월드 좌표(m).
 - 속성 ``width_in_meters``, ``width_in_pixels``: CARLA 스크립트와 동일 의미(정사각 캔버스).
 
-좌표 매핑 (CARLA ``MapImage.world_to_pixel`` 와 동일)
-------------------------------------------------------
-CARLA 는 pygame 에 점을 넣을 때 ``[round(y_map), round(x_map)]`` 형태를 사용한다
-(``x_map = ppm * (world.x - ox)``, ``y_map = ppm * (world.y - oy)``).
-OpenCV ``polylines`` 는 ``(x, y) = (열, 행)`` 이므로 동일 숫자를 그대로 사용한다.
+좌표 매핑 (carla-roach ``chauffeurnet._world_to_pixel`` 와 동일)
+----------------------------------------------------------------
+``x = ppm * (world.x - ox)``, ``y = ppm * (world.y - oy)`` 를 OpenCV ``(x, y)`` = (열, 행)으로 사용한다.
+``world_to_pixel_carla`` 가 이 순서를 반환한다. **road H5 를 수정한 뒤에는 반드시 H5 를 다시 bake 할 것.**
 
 MGeo / link_set 참고
 --------------------
@@ -104,14 +103,14 @@ def compute_world_bounds(
 
 def world_to_pixel_carla(wx: float, wy: float, ppm: float, world_offset: np.ndarray) -> Tuple[int, int]:
     """
-    CARLA MapImage.world_to_pixel 과 동일한 스케일·축 순서.
+    carla-roach chauffeurnet._world_to_pixel 과 동일: (x, y) = OpenCV 이미지 (열, 행).
 
-    pygame 점 (x, y) = (round(ppm*(wy-oy)), round(ppm*(wx-ox))).
-    OpenCV polylines 의 (x, y)에 그대로 사용.
+    x = ppm * (wx - ox), y = ppm * (wy - oy) — polylines / warpAffine 와 축 일치.
+    (이전 (y,x) 반환은 H5 road 래스터와 ego 워핑이 어긋나는 원인이 됨.)
     """
     xm = ppm * (wx - float(world_offset[0]))
     ym = ppm * (wy - float(world_offset[1]))
-    return int(round(ym)), int(round(xm))
+    return int(round(xm)), int(round(ym))
 
 
 def bake_road_mask_from_links(
