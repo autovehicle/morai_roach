@@ -36,6 +36,7 @@ Roach 논문 (carla-roach)의 chauffeurnet.py BEV 표현 방식을 그대로 따
   - 세계 좌표: x=동쪽(East), y=북쪽(North)  [ENU 좌표계]
   - yaw/heading: 동쪽(East)축 기준, 반시계 방향 양수 (degrees)
   - H5 road 워핑은 CARLA와 같이 맵 픽셀 + world_offset_in_meters 를 사용한다.
+  - MORAI ENU/yaw 정합: BEV 우측 벡터는 chauffeurnet 대신 yaw-pi/2 (차량 기준 좌우 반전 방지).
 
 설치: 저장소 루트에서 pip install -e . (network, morai_gym import)
 
@@ -435,8 +436,9 @@ class BEVDynamicRenderer:
             [ppm * (ego_x - ox), ppm * (ego_y - oy)], dtype=np.float32)
         yaw = np.deg2rad(ego_yaw_deg)
         forward_vec = np.array([np.cos(yaw), np.sin(yaw)], dtype=np.float32)
+        # MORAI ENU/yaw: chauffeurnet(yaw+pi/2) 기준은 BEV가 차량 기준 좌우 반전됨 → yaw-pi/2 로 보정
         right_vec = np.array(
-            [np.cos(yaw + 0.5 * np.pi), np.sin(yaw + 0.5 * np.pi)],
+            [np.cos(yaw - 0.5 * np.pi), np.sin(yaw - 0.5 * np.pi)],
             dtype=np.float32)
         w = float(self._width)
         ev_b = float(self._ev_to_bottom)
@@ -799,10 +801,10 @@ class BEVDynamicRenderer:
         """
         yaw = np.deg2rad(ego_yaw_deg)
 
-        # Ego의 전방·우측 단위벡터 — chauffeurnet._get_warp_transform 과 동일 (yaw + pi/2)
+        # 전방·우측: road 워프(_affine_bev_from_ego_map_px)와 동일하게 yaw-pi/2 (MORAI 좌우 정합)
         forward_vec = np.array([np.cos(yaw), np.sin(yaw)])
-        right_vec = np.array([np.cos(yaw + 0.5 * np.pi),
-                              np.sin(yaw + 0.5 * np.pi)])
+        right_vec = np.array([np.cos(yaw - 0.5 * np.pi),
+                              np.sin(yaw - 0.5 * np.pi)])
 
         mpp = 1.0 / self._ppm  # meters per pixel
         ego_pos = np.array([ego_x, ego_y])
