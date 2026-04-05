@@ -13,11 +13,9 @@ Roach 논문 (carla-roach)의 chauffeurnet.py BEV 표현 방식을 그대로 따
   - 신호등: stopline을 BEV에 렌더링, 상태별 밝기값 (green=80, yellow=170, red=255)
 
 신호등 stopline 매핑:
-  MORAI는 신호등과 정지선이 1:1 대응되지 않으므로,
-  traffic_light_set.json과 stoplane_marking_set.json을 로드하여
-  각 정지선에서 가장 가까운 신호등을 매핑한다.
-  Roach 원본의 _get_mask_from_stopline_vtx()와 동일하게
-  stopline을 cv.line()으로 BEV에 렌더링한다.
+  traffic_light_set / stoplane / link_set 사용. 신호등별 수동 맵 →
+  link_id_list+링크 시작점 근접 정지선 → 거리 fallback 순 매칭.
+  Roach와 동일하게 stopline은 cv.line()으로 BEV에 렌더링한다.
 
 채널 구성 — carla-roach chauffeurnet.py와 동일 순서 (총 3 + 3*K, K=len(history_idx), 기본 15채널):
   masks shape: (3 + 3*K, H, W) uint8
@@ -104,17 +102,15 @@ def _tint(color, factor):
 # ═══════════════════════════════════════════════════════════════════
 
 class TrafficLightStoplineMapper:
-    """신호등과 정지선의 최근접 매핑을 관리한다.
+    """신호등 → 정지선 매핑 (main 브랜치 3단계 로직, carla stopline_vtx 형식 유지).
 
-    MORAI의 traffic_light_set.json과 stoplane_marking_set.json을 로드하여
-    각 정지선에서 가장 가까운 신호등을 찾아 매핑한다.
+    매핑 순서 (신호등 단위):
+      1) 수동: ``link_id_list``가 비어 삼거리 등에서 링크 기준이 안 맞는 TL.
+      2) ``link_id_list`` + ``link_set.json``: 각 링크의 시작점(첫 point)에 가장 가까운
+         정지선 중심에 매칭 (여러 링크 → 여러 정지선).
+      3) fallback: 신호등 좌표에 가장 가까운 정지선 중심 (기존 거리 기반).
 
-    매핑 결과:
-      tl_idx → list of stopline_vtx
-      각 stopline_vtx = [(x1, y1), (x2, y2)]  (정지선의 시작점과 끝점)
-
-    Roach 원본에서 TrafficLightHandler.get_stopline_vtx()가 반환하는 것과
-    동일한 형태의 데이터를 제공한다.
+    매핑 결과: tl_idx → [stopline_vtx, ...], stopline_vtx = [(x1,y1),(x2,y2)].
     """
 
     def __init__(self, tl_json_path: str, stopline_json_path: str,
@@ -130,43 +126,90 @@ class TrafficLightStoplineMapper:
         with open(stopline_json_path, 'r', encoding='utf-8') as f:
             stopline_data = json.load(f)
 
-        # 신호등 위치: {idx: (x, y)}
         tl_positions: Dict[str, Tuple[float, float]] = {}
         for tl in tl_data:
             tl_positions[tl['idx']] = (tl['point'][0], tl['point'][1])
 
-        # 정지선 → 시작/끝 꼭짓점 (Roach stopline_vtx 형태)
-        # 각 정지선의 첫 점과 마지막 점을 stopline 양 끝으로 사용
-        stopline_vtx_list: List[Tuple[str, List[Tuple[float, float]]]] = []
+        link_json_path = Path(tl_json_path).parent / 'link_set.json'
+        link_endpoints: Dict[str, Tuple[float, float]] = {}
+        if link_json_path.is_file():
+            with open(link_json_path, 'r', encoding='utf-8') as f:
+                link_data = json.load(f)
+            for link in link_data:
+                pts = link.get('points')
+                if not pts or len(pts) < 2:
+                    continue
+                lid = link.get('idx')
+                if lid is None:
+                    continue
+                link_endpoints[str(lid)] = (float(pts[0][0]), float(pts[0][1]))
+
+        stopline_vtx_list: List[Tuple[str, float, float, List[Tuple[float, float]]]] = []
         for sl in stopline_data:
             pts = sl['points']
             if len(pts) < 2:
                 continue
-            # 정지선의 시작점과 끝점
             p_start = (pts[0][0], pts[0][1])
             p_end = (pts[-1][0], pts[-1][1])
-            # 정지선 중심 (매칭용)
             cx = sum(p[0] for p in pts) / len(pts)
             cy = sum(p[1] for p in pts) / len(pts)
             stopline_vtx_list.append((sl['idx'], cx, cy, [p_start, p_end]))
 
-        # 각 정지선에서 가장 가까운 신호등 찾기 → tl_idx별로 그룹핑
-        # 결과: {tl_idx: [stopline_vtx, ...]}
+        # KATRI 삼거리 등: link_id 비어 있거나 링크 매칭만으로 부족한 TL (main과 동일)
+        MANUAL_TL_TO_STOPLANE: Dict[str, List[str]] = {
+            'C119BS010063': ['B219BS010022'],
+        }
+
         self._tl_to_stoplines: Dict[str, List[List[Tuple[float, float]]]] = {}
         self._all_tl_positions = tl_positions
 
-        for sl_idx, cx, cy, vtx in stopline_vtx_list:
+        sl_vtx_map: Dict[str, List[Tuple[float, float]]] = {
+            sl_idx: vtx for sl_idx, _cx, _cy, vtx in stopline_vtx_list}
+
+        for tl in tl_data:
+            tl_idx = tl['idx']
+            link_id_list = tl.get('link_id_list') or []
+
+            if tl_idx in MANUAL_TL_TO_STOPLANE:
+                matched: List[List[Tuple[float, float]]] = []
+                for sl_idx in MANUAL_TL_TO_STOPLANE[tl_idx]:
+                    vtx = sl_vtx_map.get(sl_idx)
+                    if vtx is not None:
+                        matched.append(vtx)
+                if matched:
+                    self._tl_to_stoplines[tl_idx] = matched
+                continue
+
+            if link_id_list and link_endpoints:
+                matched = []
+                for link_id in link_id_list:
+                    lid = str(link_id)
+                    if lid not in link_endpoints:
+                        continue
+                    ex, ey = link_endpoints[lid]
+                    min_d = float('inf')
+                    best_vtx: Optional[List[Tuple[float, float]]] = None
+                    for _sl_idx, cx, cy, vtx in stopline_vtx_list:
+                        d = np.sqrt((cx - ex) ** 2 + (cy - ey) ** 2)
+                        if d < min_d:
+                            min_d = d
+                            best_vtx = vtx
+                    if best_vtx is not None and min_d <= max_match_distance:
+                        matched.append(best_vtx)
+                if matched:
+                    self._tl_to_stoplines[tl_idx] = matched
+                    continue
+
+            tx, ty = tl_positions[tl_idx]
             min_dist = float('inf')
-            best_tl_idx = None
-            for tl_idx, (tx, ty) in tl_positions.items():
+            best_vtx = None
+            for _sl_idx, cx, cy, vtx in stopline_vtx_list:
                 d = np.sqrt((cx - tx) ** 2 + (cy - ty) ** 2)
                 if d < min_dist:
                     min_dist = d
-                    best_tl_idx = tl_idx
-            if best_tl_idx is not None and min_dist <= max_match_distance:
-                if best_tl_idx not in self._tl_to_stoplines:
-                    self._tl_to_stoplines[best_tl_idx] = []
-                self._tl_to_stoplines[best_tl_idx].append(vtx)
+                    best_vtx = vtx
+            if best_vtx is not None and min_dist <= max_match_distance:
+                self._tl_to_stoplines[tl_idx] = [best_vtx]
 
         n_matched = sum(len(v) for v in self._tl_to_stoplines.values())
         n_tl_matched = len(self._tl_to_stoplines)
