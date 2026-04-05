@@ -143,6 +143,8 @@ python run\test_bev_dynamic.py --test-lane
 - BEV가 틀어지면 `bev_render._get_warp_transform` 의 좌표·yaw 정의를 MORAI 문서와 대조합니다.
 - UDP가 안 오면 방화벽·`ipconfig.json` 의 IP/포트를 확인합니다.
 - **`pip` / `python` 인식 안 됨**: CMD에서 `conda activate morai` 후 다시 시도하거나, 전체 경로로 `conda run -n morai python ...` 사용.
+- **`pip install -r requirements.txt` 에서 `UnicodeDecodeError` (cp949)**: `requirements.txt` 는 ASCII 주석만 사용합니다. 그래도 실패하면 CMD에서 `set PYTHONUTF8=1` 후 재실행합니다.
+- **road H5 없음 경고**: `config/birdview.yaml` 의 `static_map.h5_path`(`morai_katri_map.h5`)와 실제 파일 이름이 같아야 합니다. 없으면 `python -m morai_gym.utils.birdview_map` 으로 생성합니다. 예전에 `morai_kcity_map.h5` 만 있는 경우 이름을 바꾸거나 다시 베이크합니다.
 
 ---
 
