@@ -1,0 +1,13 @@
+# MORAI 데이터 수집 자동화 의존성
+
+numpy>=1.21.0
+pyyaml>=6.0
+
+# gRPC (다른 팀 구현체 연동 시 필요)
+grpcio>=1.50.0
+grpcio-tools>=1.50.0
+
+# ROS 관련 (apt으로 별도 설치)
+# sudo apt install ros-noetic-cv-bridge
+# sudo apt install ros-noetic-sensor-msgs
+# rospy, cv_bridge, sensor_msgs, morai_msgs 는 여기서 설치 안 함

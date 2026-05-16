@@ -1,0 +1,21 @@
+{
+  "zone": "urban",
+  "scenario": "traffic_jam",
+  "episode_id": 4,
+  "start": {
+    "x": 205.41476006973488,
+    "y": 100.79409901652924,
+    "yaw": -127.97200288300883
+  },
+  "goal": {
+    "x": 538.2112872584632,
+    "y": 142.55258273918366
+  },
+  "npc_count": 9,
+  "pedestrian_count": 3,
+  "is_longtail": true,
+  "longtail_triggers": [
+    "sudden_brake"
+  ],
+  "max_steps": 1000
+}
